@@ -43,7 +43,14 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private var lastWorkerError: String?
     private var isCancelling = false
     private var languageOptions: [LanguageOption] = []
-    private var aiReflowWindowController: AIReflowWindowController?
+    private let aiEngine = AIReflowEngine()
+    private var aiSettingsExpanded = false
+    private var parseSettingsExpanded = false
+    private let parseSettingsExpandedKey = "parseSettingsExpanded"
+    private let aiSettingsExpandedKey = "aiSettingsExpanded"
+    private weak var mainScrollView: NSScrollView?
+    private let parseSettingsRows = NSStackView()
+    private let parseSettingsToggle = BTButton(title: "展开设置", symbol: "chevron.right", style: .ghost, height: 22)
 
     private let headerIconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: appTitle)
@@ -69,11 +76,26 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private let chooseButton = BTButton(title: "选择文件", symbol: "folder", style: .ghost, height: 28)
     private let ocrButton = BTButton(title: "本地 OCR 备用", symbol: "text.viewfinder", style: .secondary, height: 30)
     private let parseButton = BTButton(title: "开始转换", symbol: "wand.and.stars", style: .primary, height: 30)
-    private let aiButton = BTButton(title: "打开 AI 排版", symbol: "text.alignleft", style: .accent, height: 30)
+    private let aiButton = BTButton(title: "开始 AI 排版", symbol: "wand.and.stars", style: .accent, height: 30)
     private let cancelButton = BTButton(title: "终止并清理", symbol: "stop.circle", style: .destructive, height: 28)
     private let openOutputButton = BTButton(title: "打开产物目录", symbol: "folder", style: .secondary, height: 28)
+    private let aiInputLabel = BTUI.label("暂无文本：完成第 2 步后自动可用", size: 11, color: .tertiaryLabelColor)
+    private let aiSettingsToggle = BTButton(title: "AI 排版接口设置", symbol: "chevron.right", style: .ghost, height: 22)
+    private let aiSettingsStack = NSStackView()
+    private let aiAPIURLField = NSTextField(string: "")
+    private let aiModelField = NSTextField(string: "")
+    private let aiAPIKeyField = NSSecureTextField(string: "")
+    private let aiChunkSizeField = NSTextField(string: "")
+    private let aiFormatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let aiResumeRow = NSView()
+    private let aiResumeLabel = BTUI.label("", size: 11, color: .systemOrange)
+    private let aiResumeButton = BTButton(title: "继续未完成", symbol: "play.circle", style: .secondary, height: 24)
+    private let aiSkipButton = BTButton(title: "跳过当前块", symbol: "forward.end", style: .ghost, height: 24)
+    private let aiCleanupButton = BTButton(title: "清理断点", symbol: "trash", style: .ghost, height: 24)
+    private let aiCancelButton = BTButton(title: "终止 AI 排版", symbol: "stop.circle", style: .destructive, height: 24)
     private let logView = NSTextView(frame: .zero)
     private var stepOneDetailLabel: NSTextField?
+    private var stepThreeDetailLabel: NSTextField?
 
     init() {
         let window = NSWindow(
@@ -93,7 +115,11 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         window.center()
         discoverLanguages()
         loadSavedMinerUToken()
+        applyExpansionStates()
+        wireAIEngine()
+        loadSavedAISettings()
         updateControls(isRunning: false)
+        aiEngine.loadResumeState(for: currentTextURL())
     }
 
     required init?(coder: NSCoder) {
@@ -124,6 +150,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     func shutdownForTermination() {
+        aiEngine.shutdownForTermination()
         if process?.isRunning == true {
             isCancelling = true
             if let childPID { kill(childPID, SIGTERM) }
@@ -132,7 +159,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     @objc private func chooseFile() {
-        guard process == nil else { return }
+        guard process == nil, !aiEngine.isRunning else { return }
         let panel = NSOpenPanel()
         panel.title = "选择 PDF、TXT 或 MD"
         panel.allowedFileTypes = ["pdf", "txt", "md", "markdown"]
@@ -189,26 +216,62 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         )
     }
 
-    @objc private func sendToAIReflow() {
-        let target = currentTextURL()
-        if let aiReflowWindowController {
-            if let target {
-                aiReflowWindowController.loadInput(target)
-            } else {
-                aiReflowWindowController.showWindow(nil)
-                NSApp.activate(ignoringOtherApps: true)
+    @objc private func startAIReflow() {
+        guard process == nil, !aiEngine.isRunning else {
+            showFailure("当前还有任务在运行，请先等待完成或终止")
+            return
+        }
+        syncAISettingsToEngine()
+        if aiEngine.resumeAvailable {
+            if let error = aiEngine.resume() {
+                showFailure(error)
             }
-        } else {
-            aiReflowWindowController = AIReflowWindowController(initialInput: target)
-            aiReflowWindowController?.showWindow(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            return
         }
-        if let target {
-            statusLabel.stringValue = "已打开 AI 排版窗口：\(target.lastPathComponent)"
-        } else {
-            statusLabel.stringValue = "已打开 AI 排版窗口，请选择 MD / TXT 文件"
+        guard let input = currentTextURL() else {
+            showFailure("没有可排版的文本：请先完成第 2 步，或选择 TXT / MD 文件")
+            return
         }
-        statusLabel.textColor = .labelColor
+        if aiEngine.apiURLString.isEmpty || aiEngine.apiKeyString.isEmpty {
+            setAISettingsExpanded(true)
+            showFailure("第一次使用请先在「AI 排版接口设置」里填写 API 地址和 API Key")
+            window?.makeFirstResponder(aiEngine.apiURLString.isEmpty ? aiAPIURLField : aiAPIKeyField)
+            return
+        }
+        logView.string = "AI 排版日志：\n"
+        outputURL = nil
+        if let error = aiEngine.start(input: input) {
+            showFailure(error)
+        }
+    }
+
+    @objc private func resumeAIReflow() {
+        guard process == nil, !aiEngine.isRunning else { return }
+        syncAISettingsToEngine()
+        if let error = aiEngine.resume() {
+            showFailure(error)
+        }
+    }
+
+    @objc private func skipAIChunk() {
+        guard process == nil, !aiEngine.isRunning else { return }
+        syncAISettingsToEngine()
+        logView.string = "AI 排版日志：\n"
+        if let error = aiEngine.skipChunkAndContinue() {
+            showFailure(error)
+        }
+    }
+
+    @objc private func cleanupAIReflow() {
+        aiEngine.cancelOrCleanup()
+    }
+
+    @objc private func cancelAIReflow() {
+        aiEngine.cancelOrCleanup()
+    }
+
+    @objc private func toggleAISettings() {
+        setAISettingsExpanded(!aiSettingsExpanded)
     }
 
     @objc private func cancelProcessing() {
@@ -222,7 +285,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     @objc private func openOutputDirectory() {
-        guard let targetURL = outputURL ?? lastTextURL ?? selectedURL else { return }
+        guard let targetURL = outputURL ?? aiEngine.outputURL ?? lastTextURL ?? selectedURL else { return }
         let target = fileManager.fileExists(atPath: targetURL.path) ? targetURL : targetURL.deletingLastPathComponent()
         NSWorkspace.shared.activateFileViewerSelecting([target])
     }
@@ -241,18 +304,49 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         root.autoresizingMask = [.width, .height]
         window?.contentView = root
 
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        root.addSubview(scrollView)
+        mainScrollView = scrollView
+
+        let documentView = NSView()
+        documentView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = documentView
+
         let mainStack = NSStackView()
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
         mainStack.spacing = 10
         mainStack.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(mainStack)
+        documentView.addSubview(mainStack)
+
+        let bottomBar = makeBottomBar()
+        bottomBar.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(bottomBar)
 
         NSLayoutConstraint.activate([
-            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
-            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
-            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
-            mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -18)
+            scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: root.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: bottomBar.topAnchor, constant: -10),
+
+            documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor),
+            documentView.heightAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.heightAnchor),
+
+            mainStack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor, constant: 24),
+            mainStack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor, constant: -24),
+            mainStack.topAnchor.constraint(equalTo: documentView.topAnchor, constant: 20),
+            mainStack.bottomAnchor.constraint(equalTo: documentView.bottomAnchor, constant: -18),
+
+            bottomBar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            bottomBar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+            bottomBar.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -18),
+            bottomBar.heightAnchor.constraint(equalToConstant: 30)
         ])
 
         addFullWidth(makeHeader(), to: mainStack, spacingAfter: 4)
@@ -264,8 +358,6 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         let logCard = makeLogCard()
         logCard.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
         addFullWidth(logCard, to: mainStack)
-
-        addFullWidth(makeBottomBar(), to: mainStack, spacingAfter: 0)
     }
 
     private func makeHeader() -> NSView {
@@ -339,10 +431,27 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func makeSettingsCard() -> NSView {
-        let card = BTCardView(insets: NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16))
+        let card = BTCardView(insets: NSEdgeInsets(top: 10, left: 16, bottom: 12, right: 16))
 
+        let headerRow = NSView()
         let header = BTUI.sectionHeader(title: "解析设置", symbol: "slider.horizontal.3")
-        card.stack.addArrangedSubview(header)
+        header.translatesAutoresizingMaskIntoConstraints = false
+        headerRow.addSubview(header)
+
+        parseSettingsToggle.target = self
+        parseSettingsToggle.action = #selector(toggleParseSettings)
+        parseSettingsToggle.translatesAutoresizingMaskIntoConstraints = false
+        headerRow.addSubview(parseSettingsToggle)
+        NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor),
+            header.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+            parseSettingsToggle.trailingAnchor.constraint(equalTo: headerRow.trailingAnchor),
+            parseSettingsToggle.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+            parseSettingsToggle.widthAnchor.constraint(equalToConstant: 104),
+            headerRow.heightAnchor.constraint(equalToConstant: 22)
+        ])
+        card.stack.addArrangedSubview(headerRow)
+        headerRow.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
 
         let languageLabel = BTUI.formLabel("识别语言")
         let parserLabel = BTUI.formLabel("PDF 解析")
@@ -396,10 +505,17 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         parserPopup.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         mineruTokenField.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
-        card.stack.addArrangedSubview(rowOne)
-        card.stack.addArrangedSubview(rowTwo)
-        rowOne.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
-        rowTwo.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        parseSettingsRows.orientation = .vertical
+        parseSettingsRows.alignment = .leading
+        parseSettingsRows.spacing = 8
+        parseSettingsRows.addArrangedSubview(rowOne)
+        parseSettingsRows.addArrangedSubview(rowTwo)
+        rowOne.widthAnchor.constraint(equalTo: parseSettingsRows.widthAnchor).isActive = true
+        rowTwo.widthAnchor.constraint(equalTo: parseSettingsRows.widthAnchor).isActive = true
+        parseSettingsRows.isHidden = true
+
+        card.stack.addArrangedSubview(parseSettingsRows)
+        parseSettingsRows.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
         card.stack.spacing = 8
         return card
     }
@@ -426,8 +542,9 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         let stepThree = makeStepRow(
             number: 3,
             title: "交给 AI 排版",
-            subtitle: "进一步整理章节与段落",
-            button: aiButton
+            subtitle: "自动使用第 2 步的文本，无需重新选择文件",
+            button: aiButton,
+            detailAssign: { [weak self] label in self?.stepThreeDetailLabel = label }
         )
 
         for view in [stepOne, BTUI.separator(), stepTwo, BTUI.separator(), stepThree] {
@@ -435,8 +552,154 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
             card.stack.addArrangedSubview(view)
             view.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
         }
+
+        let aiSection = makeAISection()
+        aiSection.translatesAutoresizingMaskIntoConstraints = false
+        card.stack.addArrangedSubview(aiSection)
+        aiSection.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        card.stack.setCustomSpacing(2, after: stepThree)
+
         card.stack.spacing = 4
         return card
+    }
+
+    private func makeAISection() -> NSView {
+        let section = NSView()
+
+        let sectionStack = NSStackView()
+        sectionStack.orientation = .vertical
+        sectionStack.alignment = .leading
+        sectionStack.spacing = 6
+        sectionStack.translatesAutoresizingMaskIntoConstraints = false
+        section.addSubview(sectionStack)
+        NSLayoutConstraint.activate([
+            sectionStack.leadingAnchor.constraint(equalTo: section.leadingAnchor, constant: 32),
+            sectionStack.trailingAnchor.constraint(equalTo: section.trailingAnchor, constant: -2),
+            sectionStack.topAnchor.constraint(equalTo: section.topAnchor),
+            sectionStack.bottomAnchor.constraint(equalTo: section.bottomAnchor)
+        ])
+
+        // 自动输入提示 + 可展开接口设置开关
+        let inputRow = NSView()
+        aiInputLabel.lineBreakMode = .byTruncatingMiddle
+        aiInputLabel.translatesAutoresizingMaskIntoConstraints = false
+        aiInputLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        inputRow.addSubview(aiInputLabel)
+
+        aiSettingsToggle.target = self
+        aiSettingsToggle.action = #selector(toggleAISettings)
+        aiSettingsToggle.translatesAutoresizingMaskIntoConstraints = false
+        inputRow.addSubview(aiSettingsToggle)
+
+        NSLayoutConstraint.activate([
+            inputRow.heightAnchor.constraint(equalToConstant: 24),
+            aiInputLabel.leadingAnchor.constraint(equalTo: inputRow.leadingAnchor),
+            aiInputLabel.centerYAnchor.constraint(equalTo: inputRow.centerYAnchor),
+            aiInputLabel.trailingAnchor.constraint(lessThanOrEqualTo: aiSettingsToggle.leadingAnchor, constant: -10),
+            aiSettingsToggle.trailingAnchor.constraint(equalTo: inputRow.trailingAnchor),
+            aiSettingsToggle.centerYAnchor.constraint(equalTo: inputRow.centerYAnchor),
+            aiSettingsToggle.widthAnchor.constraint(equalToConstant: 148)
+        ])
+
+        // 可展开的接口设置
+        aiSettingsStack.orientation = .vertical
+        aiSettingsStack.alignment = .leading
+        aiSettingsStack.spacing = 6
+        aiSettingsStack.isHidden = true
+
+        for field in [aiAPIURLField, aiModelField, aiAPIKeyField, aiChunkSizeField] {
+            field.font = NSFont.systemFont(ofSize: 12)
+            field.isBezeled = true
+            field.bezelStyle = .roundedBezel
+            field.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            field.cell?.usesSingleLineMode = true
+        }
+        aiAPIURLField.placeholderString = "https://api.openai.com/v1/chat/completions"
+        aiModelField.placeholderString = "gpt-4o-mini"
+        aiAPIKeyField.placeholderString = "sk-… 只保存在本机偏好设置里"
+        aiChunkSizeField.placeholderString = "8000"
+        aiFormatPopup.controlSize = .regular
+        aiFormatPopup.addItems(withTitles: aiFormatOptions.map(\.title))
+
+        let urlLabel = BTUI.formLabel("API 地址")
+        let modelLabel = BTUI.formLabel("模型")
+        let keyLabel = BTUI.formLabel("API Key")
+        let chunkLabel = BTUI.formLabel("分块字符数")
+        let formatLabel = BTUI.formLabel("AI 输出格式")
+        for label in [urlLabel, modelLabel, keyLabel, chunkLabel, formatLabel] {
+            label.widthAnchor.constraint(equalToConstant: 86).isActive = true
+        }
+
+        let urlRow = makeAIFormRow([urlLabel, aiAPIURLField])
+        let keyRow = makeAIFormRow([modelLabel, aiModelField, keyLabel, aiAPIKeyField])
+        aiModelField.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        keyLabel.widthAnchor.constraint(equalToConstant: 76).isActive = true
+
+        let rowSpacer = NSView()
+        rowSpacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let formatRow = makeAIFormRow([chunkLabel, aiChunkSizeField, formatLabel, aiFormatPopup, rowSpacer])
+        aiChunkSizeField.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        aiFormatPopup.widthAnchor.constraint(equalToConstant: 210).isActive = true
+        aiFormatPopup.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+
+        aiAPIURLField.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        aiAPIKeyField.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+
+        for row in [urlRow, keyRow, formatRow] {
+            aiSettingsStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: aiSettingsStack.widthAnchor).isActive = true
+        }
+
+        // 断点 / 运行状态行
+        aiResumeLabel.lineBreakMode = .byTruncatingTail
+        aiResumeLabel.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        aiResumeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        aiResumeButton.target = self
+        aiResumeButton.action = #selector(resumeAIReflow)
+        aiSkipButton.target = self
+        aiSkipButton.action = #selector(skipAIChunk)
+        aiCleanupButton.target = self
+        aiCleanupButton.action = #selector(cleanupAIReflow)
+        aiCancelButton.target = self
+        aiCancelButton.action = #selector(cancelAIReflow)
+
+        let resumeStack = NSStackView(views: [aiResumeLabel, aiResumeButton, aiSkipButton, aiCleanupButton, aiCancelButton])
+        resumeStack.orientation = .horizontal
+        resumeStack.alignment = .centerY
+        resumeStack.spacing = 8
+        resumeStack.translatesAutoresizingMaskIntoConstraints = false
+
+        aiResumeRow.addSubview(resumeStack)
+        NSLayoutConstraint.activate([
+            aiResumeRow.heightAnchor.constraint(equalToConstant: 24),
+            resumeStack.leadingAnchor.constraint(equalTo: aiResumeRow.leadingAnchor),
+            resumeStack.trailingAnchor.constraint(equalTo: aiResumeRow.trailingAnchor),
+            resumeStack.topAnchor.constraint(equalTo: aiResumeRow.topAnchor),
+            resumeStack.bottomAnchor.constraint(equalTo: aiResumeRow.bottomAnchor)
+        ])
+        aiResumeRow.isHidden = true
+        aiResumeButton.widthAnchor.constraint(equalToConstant: 108).isActive = true
+        aiSkipButton.widthAnchor.constraint(equalToConstant: 104).isActive = true
+        aiCleanupButton.widthAnchor.constraint(equalToConstant: 92).isActive = true
+        aiCancelButton.widthAnchor.constraint(equalToConstant: 108).isActive = true
+
+        sectionStack.addArrangedSubview(inputRow)
+        inputRow.widthAnchor.constraint(equalTo: sectionStack.widthAnchor).isActive = true
+        sectionStack.addArrangedSubview(aiSettingsStack)
+        aiSettingsStack.widthAnchor.constraint(equalTo: sectionStack.widthAnchor).isActive = true
+        sectionStack.addArrangedSubview(aiResumeRow)
+        aiResumeRow.widthAnchor.constraint(equalTo: sectionStack.widthAnchor).isActive = true
+        return section
+    }
+
+    private func makeAIFormRow(_ views: [NSView]) -> NSStackView {
+        let row = NSStackView(views: views)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        row.distribution = .fill
+        return row
     }
 
     private func makeStepRow(number: Int, title: String, subtitle: String, button: BTButton, detailAssign: ((NSTextField) -> Void)? = nil) -> NSView {
@@ -584,7 +847,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         parseButton.action = #selector(runPDFParse)
         parseButton.keyEquivalent = "\r"
         aiButton.target = self
-        aiButton.action = #selector(sendToAIReflow)
+        aiButton.action = #selector(startAIReflow)
 
         NSLayoutConstraint.activate([
             bar.heightAnchor.constraint(equalToConstant: 30),
@@ -618,7 +881,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     // MARK: - Selection
 
     private func setSelectedFile(_ url: URL) {
-        guard process == nil else { return }
+        guard process == nil, !aiEngine.isRunning else { return }
         let ext = url.pathExtension.lowercased()
         guard ["pdf", "txt", "md", "markdown"].contains(ext) else {
             showFailure("请选择 PDF、TXT 或 MD 文件")
@@ -641,24 +904,201 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         logView.string = "日志会显示在这里。\n"
         setProgress(0)
         updateControls(isRunning: false)
+        aiEngine.loadResumeState(for: currentTextURL())
     }
 
     private func updateControls(isRunning: Bool) {
         let ext = selectedURL?.pathExtension.lowercased() ?? ""
         let isPDF = ext == "pdf"
         let parserIsLocal = selectedParserCode() == "local"
-        chooseButton.isEnabled = !isRunning
-        dropZone.isInteractionEnabled = !isRunning
-        languagePopup.isEnabled = !isRunning
-        parserPopup.isEnabled = !isRunning
-        formatPopup.isEnabled = !isRunning
-        mineruTokenField.isEnabled = !isRunning
-        ocrButton.isEnabled = !isRunning && isPDF && !languageOptions.isEmpty && parserIsLocal
-        parseButton.isEnabled = !isRunning && isPDF && !languageOptions.isEmpty
-        aiButton.isEnabled = !isRunning
+        let busy = isRunning || aiEngine.isRunning
+        chooseButton.isEnabled = !busy
+        dropZone.isInteractionEnabled = !busy
+        languagePopup.isEnabled = !busy
+        parserPopup.isEnabled = !busy
+        formatPopup.isEnabled = !busy
+        mineruTokenField.isEnabled = !busy
+        ocrButton.isEnabled = !busy && isPDF && !languageOptions.isEmpty && parserIsLocal
+        parseButton.isEnabled = !busy && isPDF && !languageOptions.isEmpty
         cancelButton.isEnabled = isRunning
-        openOutputButton.isEnabled = !isRunning && (outputURL != nil || lastTextURL != nil || selectedURL != nil)
+        openOutputButton.isEnabled = !busy && (outputURL != nil || aiEngine.outputURL != nil || lastTextURL != nil || selectedURL != nil)
         refreshModeUI()
+        refreshAISection()
+    }
+
+    // MARK: - AI 排版
+
+    private func wireAIEngine() {
+        aiEngine.onStatus = { [weak self] text, color in
+            self?.statusLabel.stringValue = text
+            self?.statusLabel.textColor = color
+        }
+        aiEngine.onProgress = { [weak self] value in
+            self?.setProgress(value)
+        }
+        aiEngine.onProgressLabel = { [weak self] text in
+            self?.progressLabel.stringValue = text
+        }
+        aiEngine.onOutput = { [weak self] text in
+            self?.outputLabel.stringValue = text
+        }
+        aiEngine.onLog = { [weak self] text in
+            self?.appendLog(text + "\n")
+        }
+        aiEngine.onStateChange = { [weak self] in
+            guard let self else { return }
+            self.updateControls(isRunning: self.process?.isRunning == true)
+        }
+        aiEngine.onResumeStateChanged = { [weak self] in
+            self?.refreshAIResumeState()
+        }
+    }
+
+    private func loadSavedAISettings() {
+        aiAPIURLField.stringValue = aiEngine.apiURLString
+        aiModelField.stringValue = aiEngine.modelString
+        aiAPIKeyField.stringValue = aiEngine.apiKeyString
+        aiChunkSizeField.stringValue = String(aiEngine.chunkSize)
+        if let index = aiFormatOptions.firstIndex(where: { $0.code == aiEngine.formatCode }) {
+            aiFormatPopup.selectItem(at: index)
+        }
+    }
+
+    private func syncAISettingsToEngine() {
+        aiEngine.apiURLString = aiAPIURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        aiEngine.modelString = aiModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        aiEngine.apiKeyString = aiAPIKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let size = Int(aiChunkSizeField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            aiEngine.chunkSize = size
+        }
+        let index = aiFormatPopup.indexOfSelectedItem
+        if index >= 0, index < aiFormatOptions.count {
+            aiEngine.formatCode = aiFormatOptions[index].code
+        }
+    }
+
+    private func refreshAIResumeState() {
+        if let size = aiEngine.resumeChunkSize {
+            aiChunkSizeField.stringValue = String(size)
+        }
+        if let code = aiEngine.resumeFormatCode,
+           let index = aiFormatOptions.firstIndex(where: { $0.code == code }) {
+            aiFormatPopup.selectItem(at: index)
+        }
+        refreshAISection()
+    }
+
+    private func refreshAISection() {
+        let pdfBusy = process?.isRunning == true
+        let aiRunning = aiEngine.isRunning
+        let input = currentTextURL()
+
+        if let input {
+            aiInputLabel.stringValue = "自动使用：\(input.lastPathComponent)"
+            aiInputLabel.textColor = .secondaryLabelColor
+            aiInputLabel.toolTip = input.path
+        } else {
+            aiInputLabel.stringValue = "暂无文本：完成第 2 步后自动可用"
+            aiInputLabel.textColor = .tertiaryLabelColor
+            aiInputLabel.toolTip = nil
+        }
+
+        aiButton.isEnabled = !pdfBusy && !aiRunning && (input != nil || aiEngine.resumeAvailable)
+        if aiRunning {
+            aiButton.setTitleText("AI 排版中…")
+            aiButton.setSymbol("hourglass")
+        } else if aiEngine.resumeAvailable {
+            aiButton.setTitleText("继续 AI 排版")
+            aiButton.setSymbol("play.circle")
+        } else {
+            aiButton.setTitleText("开始 AI 排版")
+            aiButton.setSymbol("wand.and.stars")
+        }
+
+        if aiRunning {
+            stepThreeDetailLabel?.stringValue = "正在整理：\(progressLabel.stringValue)，日志和断点会实时更新"
+        } else if aiEngine.resumeAvailable {
+            stepThreeDetailLabel?.stringValue = "检测到未完成：已完成 \(aiEngine.resumeCompletedChunks) / \(aiEngine.resumeTotalChunks) 块"
+        } else if input != nil {
+            stepThreeDetailLabel?.stringValue = "自动使用第 2 步的文本，无需重新选择文件"
+        } else {
+            stepThreeDetailLabel?.stringValue = "完成第 2 步后，可直接开始 AI 排版"
+        }
+
+        if aiRunning {
+            aiResumeRow.isHidden = false
+            aiResumeLabel.stringValue = "AI 正在排版，终止会清理未完成产物"
+            aiResumeLabel.textColor = .systemOrange
+            aiResumeButton.isHidden = true
+            aiSkipButton.isHidden = true
+            aiCleanupButton.isHidden = true
+            aiCancelButton.isHidden = false
+        } else if aiEngine.resumeAvailable {
+            aiResumeRow.isHidden = false
+            let format = aiEngine.resumeFormatCode?.uppercased() ?? "TXT"
+            aiResumeLabel.stringValue = "未完成：\(format)，已完成 \(aiEngine.resumeCompletedChunks) / \(aiEngine.resumeTotalChunks) 块"
+            aiResumeLabel.textColor = .systemOrange
+            aiResumeButton.isHidden = false
+            aiSkipButton.isHidden = false
+            aiCleanupButton.isHidden = false
+            aiCancelButton.isHidden = true
+        } else {
+            aiResumeRow.isHidden = true
+        }
+
+        updateAISettingsToggle()
+        for field in [aiAPIURLField, aiModelField, aiAPIKeyField, aiChunkSizeField] {
+            field.isEnabled = !pdfBusy && !aiRunning
+        }
+        aiFormatPopup.isEnabled = !pdfBusy && !aiRunning
+    }
+
+    private func applyExpansionStates() {
+        let defaults = UserDefaults.standard
+        parseSettingsExpanded = defaults.bool(forKey: parseSettingsExpandedKey)
+        aiSettingsExpanded = defaults.bool(forKey: aiSettingsExpandedKey)
+        parseSettingsRows.isHidden = !parseSettingsExpanded
+        aiSettingsStack.isHidden = !aiSettingsExpanded
+        updateParseSettingsToggle()
+        updateAISettingsToggle()
+    }
+
+    private func updateParseSettingsToggle() {
+        parseSettingsToggle.setTitleText(parseSettingsExpanded ? "收起设置" : "展开设置")
+        parseSettingsToggle.setSymbol(parseSettingsExpanded ? "chevron.up" : "chevron.right")
+    }
+
+    private func updateAISettingsToggle() {
+        aiSettingsToggle.setTitleText(aiSettingsExpanded ? "收起接口设置" : "AI 排版接口设置")
+        aiSettingsToggle.setSymbol(aiSettingsExpanded ? "chevron.up" : "chevron.right")
+    }
+
+    @objc private func toggleParseSettings() {
+        parseSettingsExpanded.toggle()
+        parseSettingsRows.isHidden = !parseSettingsExpanded
+        UserDefaults.standard.set(parseSettingsExpanded, forKey: parseSettingsExpandedKey)
+        updateParseSettingsToggle()
+        if parseSettingsExpanded {
+            revealSettings(parseSettingsRows)
+        }
+    }
+
+    private func setAISettingsExpanded(_ expanded: Bool) {
+        guard expanded != aiSettingsExpanded else { return }
+        aiSettingsExpanded = expanded
+        aiSettingsStack.isHidden = !expanded
+        UserDefaults.standard.set(expanded, forKey: aiSettingsExpandedKey)
+        updateAISettingsToggle()
+        refreshAISection()
+        if expanded {
+            revealSettings(aiSettingsStack)
+        }
+    }
+
+    private func revealSettings(_ view: NSView) {
+        DispatchQueue.main.async {
+            view.scrollToVisible(view.bounds)
+        }
     }
 
     // MARK: - Worker
@@ -794,6 +1234,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
             statusLabel.textColor = .systemOrange
             outputLabel.stringValue = "本次处理未生成产物"
             updateControls(isRunning: false)
+            aiEngine.loadResumeState(for: currentTextURL())
             return
         }
 
@@ -826,6 +1267,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
             statusLabel.textColor = .systemRed
         }
         updateControls(isRunning: false)
+        aiEngine.loadResumeState(for: currentTextURL())
     }
 
     private func cleanupKnownTemporaryFiles(removePartOnly: Bool = false) {
@@ -907,8 +1349,16 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func currentTextURL() -> URL? {
-        if let selectedURL, ["txt", "md", "markdown"].contains(selectedURL.pathExtension.lowercased()) {
-            return selectedURL
+        if let selectedURL {
+            let ext = selectedURL.pathExtension.lowercased()
+            if ["txt", "md", "markdown"].contains(ext) {
+                return selectedURL
+            }
+            if ext == "pdf", let lastTextURL {
+                let pdfStem = selectedURL.deletingPathExtension().lastPathComponent
+                let textStem = lastTextURL.deletingPathExtension().lastPathComponent
+                return textStem.hasPrefix(pdfStem) ? lastTextURL : nil
+            }
         }
         return lastTextURL
     }

@@ -12,15 +12,15 @@
 
 1. PDF 解析，默认使用 MinerU 精准解析 API，也保留本地 OCRmyPDF / Tesseract 备用路线。
 2. PDF 转换为 MD / TXT / EPUB。
-3. MD / TXT 交给内置 AI 排版窗口处理。
+3. MD / TXT 直接在主窗口内交给 AI 排版。
 
-AI 排版窗口已经集成到合并版 App 中。
+AI 排版已集成在主窗口第三步下方，接口设置可展开，默认沿用上次保存的配置，不需要另外打开窗口或重新选择文件。
 
 ## 目录结构
 
-- `BookToolsHubApp.swift`：合并版主窗口源码。
-- `AIReflowApp.swift`：内置 AI 排版窗口源码。
-- `BookToolsUI.swift`：两个窗口共用的界面组件（卡片、按钮、拖拽区、进度条等）。
+- `BookToolsHubApp.swift`：合并版主窗口源码，包含内联 AI 排版区。
+- `AIReflowEngine.swift`：AI 排版引擎（分块、请求 API、断点续跑），不依赖窗口。
+- `BookToolsUI.swift`：界面组件（卡片、按钮、拖拽区、进度条等）。
 - `reflow_txt_epub_worker.command`：PDF 解析和转换 worker，包含 MinerU 和本地 OCR 路线。
 - `BookToolsHub_Info.plist`：合并版 App 的 plist。
 - `Assets/`：App 图标资源。`AppIcon-source.png` 是原始图，`AppIcon.icns` 是打包后的图标，`make_icon.py` 负责裁切圆角、加阴影并生成 iconset。
@@ -29,10 +29,12 @@ AI 排版窗口已经集成到合并版 App 中。
 ## 重要实现说明
 
 - `PDF Book Tools.app` 已经可以移动位置，当前放在 `Apps/` 下。
-- 合并版主窗口的第三步“打开 AI 排版”会打开内置 AI 排版窗口。
-- 如果主窗口已经生成 MD/TXT，AI 排版窗口会自动带入该文件。
-- 如果还没生成 MD/TXT，可以在 AI 排版窗口里拖入或双击选择 MD/TXT 文件。
-- AI 排版的 API 地址、模型、API Key、分块字符数和输出格式会保存到 UserDefaults。
+- 主窗口第三步“交给 AI 排版”下方就是 AI 排版区，不再打开独立窗口。
+- 主窗口已经生成 MD/TXT 时，“开始 AI 排版”会自动使用该文本；直接选择 TXT / MD 文件时也会自动使用，无需重复选择。
+- “解析设置”和“AI 排版接口设置”都可折叠，默认收起，并记住上次的展开/收起状态。
+- 主窗口内容放在滚动视图里；窗口尺寸保持在 860×820 左右，展开设置时日志区自动压缩，内容超出时出现滚动条，不会撑出屏幕。
+- 解析设置展开后可调整语言和解析后端等选项；AI 设置展开后可修改 API 地址、模型、API Key、分块字符数和 AI 输出格式。
+- 配置会保存到 UserDefaults；不修改配置时直接点“开始 AI 排版”即可。
 - 合并版会兼容读取旧 AI 排版 App 的已保存配置域：`local.codex.ai-txt-reflow`。
 - 不要把 API Key、MinerU Token 写进源码或 README。
 
@@ -49,7 +51,8 @@ Markdown 输入会使用更适合书籍的分块方式：
 AI 排版断点规则：
 
 - 失败、退出、网络中断时，保留 `.part` 和 `.resume.json`。
-- 只有用户点击“终止并清理”或“清理未完成”才删除断点。
+- 输入文本旁存在断点时，主窗口会显示“继续未完成 / 跳过当前块 / 清理断点”，主按钮也会变为“继续 AI 排版”。
+- 只有用户点击“终止 AI 排版”或“清理断点”才删除断点。
 - 成功完成后自动清理临时文件和断点。
 
 ## 本地 OCR 逻辑
@@ -67,12 +70,13 @@ AI 排版断点规则：
 ```zsh
 cd /Users/kbdz/Documents/BookTools
 cp BookToolsHubApp.swift /tmp/main.swift
-swiftc -target x86_64-apple-macosx13.0 -O /tmp/main.swift AIReflowApp.swift BookToolsUI.swift -o /tmp/PDFBookTools.new
+swiftc -target x86_64-apple-macosx13.0 -O /tmp/main.swift AIReflowEngine.swift BookToolsUI.swift -o /tmp/PDFBookTools.new
 cp /tmp/PDFBookTools.new "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app/Contents/MacOS/PDFBookTools"
 cp reflow_txt_epub_worker.command "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app/Contents/Resources/reflow_txt_epub_worker.command"
 cp Assets/AppIcon.icns "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
 codesign --verify --deep --strict --verbose=2 "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
 open "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
 ```
 
@@ -82,6 +86,7 @@ open "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
 - 需要把 `BookToolsHubApp.swift` 临时复制成 `/tmp/main.swift`，因为 Swift 多文件编译时只有 `main.swift` 适合放顶层启动代码。
 - 编译后必须重新签名，否则 App 可能打不开或行为异常。
 - 图标由 `Assets/make_icon.py` 生成：先处理 `AppIcon-source.png`，再执行 `iconutil -c icns` 得到 `AppIcon.icns`；App 的 `CFBundleIconFile` 指向 `AppIcon`。
+- 换图标后如果 Finder/Dock 仍显示旧图标，通常是 LaunchServices / Dock 缓存：先对 App 执行 `lsregister -f`，必要时再 `killall Dock`（Dock 会自动重启）并重新打开 App。
 
 ## 维护注意事项
 

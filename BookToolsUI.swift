@@ -225,7 +225,7 @@ final class BTButton: NSButton {
     private let style: Style
     private let buttonHeight: CGFloat
     private let buttonFont = NSFont.systemFont(ofSize: 13, weight: .medium)
-    private let symbolImage: NSImage?
+    private var symbolImage: NSImage?
     private var displayTitle: String
     private var isHovering = false
     private var isPressing = false
@@ -268,6 +268,19 @@ final class BTButton: NSButton {
         invalidateIntrinsicContentSize()
     }
 
+    func setSymbol(_ name: String?) {
+        if let name,
+           let baseImage = NSImage(systemSymbolName: name, accessibilityDescription: nil) {
+            symbolImage = baseImage.withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+            )
+        } else {
+            symbolImage = nil
+        }
+        invalidateIntrinsicContentSize()
+        needsDisplay = true
+    }
+
     private var titleColor: NSColor {
         switch style {
         case .primary:
@@ -307,7 +320,18 @@ final class BTButton: NSButton {
                 width: iconSize,
                 height: iconSize
             )
-            symbolImage.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
+            if let context = NSGraphicsContext.current {
+                context.saveGraphicsState()
+                let flip = NSAffineTransform()
+                flip.translateX(by: 0, yBy: iconRect.midY)
+                flip.scaleX(by: 1, yBy: -1)
+                flip.translateX(by: 0, yBy: -iconRect.midY)
+                flip.concat()
+                symbolImage.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
+                context.restoreGraphicsState()
+            } else {
+                symbolImage.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
+            }
             cursorX += iconSize + iconGap
         }
 
