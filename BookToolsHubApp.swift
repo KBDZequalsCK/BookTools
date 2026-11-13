@@ -46,6 +46,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private let aiEngine = AIReflowEngine()
     private var aiSettingsExpanded = false
     private var parseSettingsExpanded = false
+    private var autoStartAIAfterWorker = false
     private let parseSettingsExpandedKey = "parseSettingsExpanded"
     private let aiSettingsExpandedKey = "aiSettingsExpanded"
     private weak var mainScrollView: NSScrollView?
@@ -78,6 +79,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private let ocrButton = BTButton(title: "本地 OCR 备用", symbol: "text.viewfinder", style: .secondary, height: 30)
     private let parseButton = BTButton(title: "开始转换", symbol: "wand.and.stars", style: .primary, height: 30)
     private let aiButton = BTButton(title: "开始 AI 排版", symbol: "wand.and.stars", style: .accent, height: 30)
+    private let oneClickButton = BTButton(title: "一键处理", symbol: "bolt.fill", style: .primary, height: 30)
     private let cancelButton = BTButton(title: "终止并清理", symbol: "stop.circle", style: .destructive, height: 28)
     private let openOutputButton = BTButton(title: "打开产物目录", symbol: "folder", style: .secondary, height: 28)
     private let aiInputLabel = BTUI.label("暂无文本：完成第 2 步后自动可用", size: 11, color: .tertiaryLabelColor)
@@ -218,6 +220,10 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     @objc private func startAIReflow() {
+        beginAIReflow(clearLog: true)
+    }
+
+    private func beginAIReflow(clearLog: Bool) {
         guard process == nil, !aiEngine.isRunning else {
             showFailure("当前还有任务在运行，请先等待完成或终止")
             return
@@ -239,10 +245,55 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
             window?.makeFirstResponder(aiEngine.apiURLString.isEmpty ? aiAPIURLField : aiAPIKeyField)
             return
         }
-        logView.string = "AI 排版日志：\n"
+        if clearLog {
+            logView.string = "AI 排版日志：\n"
+        }
         outputURL = nil
         if let error = aiEngine.start(input: input) {
             showFailure(error)
+        }
+    }
+
+    @objc private func runOneClick() {
+        guard process == nil, !aiEngine.isRunning else {
+            showFailure("当前还有任务在运行，请先等待完成或终止")
+            return
+        }
+        guard let selected = selectedURL else {
+            showFailure("请先选择 PDF、TXT 或 MD 文件")
+            return
+        }
+        let ext = selected.pathExtension.lowercased()
+        if ["txt", "md", "markdown"].contains(ext) {
+            beginAIReflow(clearLog: true)
+            return
+        }
+        guard ext == "pdf" else {
+            showFailure("一键处理只支持 PDF、TXT 或 MD")
+            return
+        }
+        guard selectedLanguage() != nil else {
+            showFailure("没有可用的 OCR 语言")
+            return
+        }
+        // 先检查 AI 接口，避免解析转换完成后才发现没有配置
+        syncAISettingsToEngine()
+        if aiEngine.apiURLString.isEmpty || aiEngine.apiKeyString.isEmpty {
+            setAISettingsExpanded(true)
+            showFailure("一键处理需要先填写 AI 排版接口（API 地址和 API Key）")
+            window?.makeFirstResponder(aiEngine.apiURLString.isEmpty ? aiAPIURLField : aiAPIKeyField)
+            return
+        }
+        // EPUB 不含可直接排版文本，一键处理改用 MD
+        if selectedFormat()?.code == "epub" {
+            formatPopup.selectItem(at: 0)
+            refreshModeUI()
+            appendLog("一键处理改用 MD 输出，便于紧接着进行 AI 排版。\n")
+        }
+        autoStartAIAfterWorker = true
+        runPDFParse()
+        if process == nil {
+            autoStartAIAfterWorker = false
         }
     }
 
@@ -544,8 +595,26 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private func makeStepsCard() -> NSView {
         let card = BTCardView(insets: NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16))
 
+        let headerRow = NSView()
         let header = BTUI.sectionHeader(title: "三步流程", symbol: "list.number")
-        card.stack.addArrangedSubview(header)
+        header.translatesAutoresizingMaskIntoConstraints = false
+        headerRow.addSubview(header)
+
+        oneClickButton.target = self
+        oneClickButton.action = #selector(runOneClick)
+        oneClickButton.translatesAutoresizingMaskIntoConstraints = false
+        headerRow.addSubview(oneClickButton)
+
+        NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor),
+            header.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+            oneClickButton.trailingAnchor.constraint(equalTo: headerRow.trailingAnchor, constant: -2),
+            oneClickButton.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+            oneClickButton.widthAnchor.constraint(equalToConstant: 158),
+            headerRow.heightAnchor.constraint(equalToConstant: 30)
+        ])
+        card.stack.addArrangedSubview(headerRow)
+        headerRow.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
 
         let stepOne = makeStepRow(
             number: 1,
@@ -947,6 +1016,36 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         openOutputButton.isEnabled = !busy && (outputURL != nil || aiEngine.outputURL != nil || lastTextURL != nil || selectedURL != nil)
         refreshModeUI()
         refreshAISection()
+        updateOneClickButton(isRunning: isRunning)
+    }
+
+    private func updateOneClickButton(isRunning: Bool) {
+        let ext = selectedURL?.pathExtension.lowercased() ?? ""
+        let isPDF = ext == "pdf"
+        let isText = ["txt", "md", "markdown"].contains(ext)
+        let busy = isRunning || aiEngine.isRunning
+
+        if aiEngine.isRunning {
+            oneClickButton.setTitleText("AI 排版中…")
+            oneClickButton.setSymbol("hourglass")
+        } else if busy {
+            oneClickButton.setTitleText("一键处理中…")
+            oneClickButton.setSymbol("hourglass")
+        } else if isPDF {
+            oneClickButton.setTitleText("一键处理")
+            oneClickButton.setSymbol("bolt.fill")
+        } else if isText {
+            oneClickButton.setTitleText("一键 AI 排版")
+            oneClickButton.setSymbol("bolt.fill")
+        } else {
+            oneClickButton.setTitleText("一键处理")
+            oneClickButton.setSymbol("bolt.fill")
+        }
+
+        oneClickButton.isEnabled = !busy && (isPDF ? !languageOptions.isEmpty : isText)
+        oneClickButton.toolTip = isText
+            ? "直接对当前文本开始 AI 排版"
+            : "自动完成 PDF 解析、文本转换，然后开始 AI 排版"
     }
 
     // MARK: - AI 排版
@@ -1250,6 +1349,10 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         process = nil
         childPID = nil
 
+        let shouldAutoStartAI = autoStartAIAfterWorker
+        autoStartAIAfterWorker = false
+        var conversionSucceeded = false
+
         if isCancelling {
             cleanupKnownTemporaryFiles()
             setProgress(0)
@@ -1262,6 +1365,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         }
 
         if worker.terminationStatus == 0, let outputURL, fileManager.fileExists(atPath: outputURL.path) {
+            conversionSucceeded = true
             cleanupKnownTemporaryFiles()
             setProgress(100)
             statusLabel.stringValue = "处理完成"
@@ -1291,6 +1395,16 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         }
         updateControls(isRunning: false)
         aiEngine.loadResumeState(for: currentTextURL())
+
+        if shouldAutoStartAI, conversionSucceeded {
+            if let textURL = currentTextURL(),
+               ["txt", "md", "markdown"].contains(textURL.pathExtension.lowercased()) {
+                appendLog("\n=== 转换完成，自动开始 AI 排版 ===\n")
+                beginAIReflow(clearLog: false)
+            } else {
+                showFailure("转换完成，但没有生成可交给 AI 排版的文本")
+            }
+        }
     }
 
     private func cleanupKnownTemporaryFiles(removePartOnly: Bool = false) {
