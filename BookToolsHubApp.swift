@@ -17,7 +17,7 @@ private struct FormatOption {
 }
 
 private let formatOptions = [
-    FormatOption(title: "MD（推荐，MinerU/Markdown）", code: "md", suffix: "_reflow.md"),
+    FormatOption(title: "MD（推荐，便于 AI 排版）", code: "md", suffix: "_reflow.md"),
     FormatOption(title: "TXT（纯文字）", code: "txt", suffix: "_ocr.txt"),
     FormatOption(title: "EPUB（可调字体）", code: "epub", suffix: "_reflow.epub")
 ]
@@ -73,6 +73,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private let cancelButton = BTButton(title: "终止并清理", symbol: "stop.circle", style: .destructive, height: 28)
     private let openOutputButton = BTButton(title: "打开产物目录", symbol: "folder", style: .secondary, height: 28)
     private let logView = NSTextView(frame: .zero)
+    private var stepOneDetailLabel: NSTextField?
 
     init() {
         let window = NSWindow(
@@ -412,13 +413,14 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         let stepOne = makeStepRow(
             number: 1,
             title: "PDF 解析",
-            subtitle: "默认 MinerU 云端解析",
-            button: ocrButton
+            subtitle: "默认 MinerU 云端解析，OCR 备用",
+            button: ocrButton,
+            detailAssign: { [weak self] label in self?.stepOneDetailLabel = label }
         )
         let stepTwo = makeStepRow(
             number: 2,
             title: "转换为 MD / TXT / EPUB",
-            subtitle: "按所选格式生成电子书文本",
+            subtitle: "自动完成解析并提取文字，输出所选格式",
             button: parseButton
         )
         let stepThree = makeStepRow(
@@ -437,7 +439,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         return card
     }
 
-    private func makeStepRow(number: Int, title: String, subtitle: String, button: BTButton) -> NSView {
+    private func makeStepRow(number: Int, title: String, subtitle: String, button: BTButton, detailAssign: ((NSTextField) -> Void)? = nil) -> NSView {
         let row = NSView()
 
         let badge = BTNumberBadge(number: number)
@@ -450,6 +452,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         let detailLabel = BTUI.label(subtitle, size: 11, color: .secondaryLabelColor)
         detailLabel.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(detailLabel)
+        detailAssign?(detailLabel)
 
         button.translatesAutoresizingMaskIntoConstraints = false
         row.addSubview(button)
@@ -882,12 +885,21 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private func refreshModeUI() {
         let parserIsMineru = selectedParserCode() == "mineru"
         ocrButton.setTitleText(parserIsMineru ? "本地 OCR 备用" : "执行本地 OCR")
+        stepOneDetailLabel?.stringValue = parserIsMineru
+            ? "默认 MinerU 云端解析，OCR 备用"
+            : "本地 OCR 会在原文件旁生成可搜索 PDF"
         if let ext = selectedURL?.pathExtension.lowercased(), ext == "pdf" {
             dropZone.subtitleText = parserIsMineru
                 ? "默认直接用 MinerU 解析，OCR 只是备用路线"
                 : "当前切换为本地 OCR 模式"
             dropZone.needsDisplay = true
             fileLabel.stringValue = selectedURL.map { "已选择：\($0.path)" } ?? fileLabel.stringValue
+            if process == nil, statusLabel.stringValue.hasPrefix("PDF 已就绪") {
+                statusLabel.stringValue = parserIsMineru
+                    ? "PDF 已就绪，默认可直接 MinerU 解析"
+                    : "PDF 已就绪，可执行本地 OCR 或直接转换"
+                statusLabel.textColor = .labelColor
+            }
         }
         subtitleLabel.stringValue = parserIsMineru
             ? "把扫描版 PDF 变成干净、可编辑的电子书 · MinerU 云端解析"
