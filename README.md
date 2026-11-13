@@ -1,8 +1,10 @@
 # BookTools
 
-这是给 Intel MacBook Pro 使用的本地图书处理工具项目。主要 App 是合并版：
+这是给 Intel MacBook Pro 使用的本地图书处理工具项目。项目只保留合并版 App：
 
 `/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app`
+
+项目已纳入 git 版本管理；清理前的旧版 App 和源码保留在初始提交 `faf60f3` 中，需要时可从历史恢复。
 
 ## 当前 App 功能
 
@@ -12,7 +14,7 @@
 2. PDF 转换为 MD / TXT / EPUB。
 3. MD / TXT 交给内置 AI 排版窗口处理。
 
-AI 排版窗口已经集成到合并版 App 中，不再依赖单独打开旧的 `AI TXT-MD 排版.app`。
+AI 排版窗口已经集成到合并版 App 中。
 
 ## 目录结构
 
@@ -20,12 +22,7 @@ AI 排版窗口已经集成到合并版 App 中，不再依赖单独打开旧的
 - `AIReflowApp.swift`：内置 AI 排版窗口源码。
 - `reflow_txt_epub_worker.command`：PDF 解析和转换 worker，包含 MinerU 和本地 OCR 路线。
 - `BookToolsHub_Info.plist`：合并版 App 的 plist。
-- `Apps/PDF Book Tools.app`：当前建议使用的合并版 App。
-- `Apps/AI TXT-MD 排版.app`：旧独立 AI 排版 App，备用。
-- `Apps/OCR PDF.app`：旧独立 OCR App，备用。
-- `Apps/PDF to TXT-EPUB-MD.app`：旧独立 PDF 转换 App，备用。
-- `outputs/`：早期开发/测试输出目录，正式 App 不依赖它。
-- `work/`：早期开发辅助目录。
+- `Apps/PDF Book Tools.app`：唯一保留的合并版 App。
 
 ## 重要实现说明
 
@@ -84,7 +81,7 @@ open "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
 
 ## 维护注意事项
 
-- 默认只维护合并版 `PDF Book Tools.app`，旧的三个独立 App 先保留作备用。
+- 默认只维护合并版 `PDF Book Tools.app`；旧版独立 App 和源码已清理，需要时从 git 历史 `faf60f3` 恢复。
 - 手动改文件时优先改源码，再重新编译和签名，不要直接改二进制。
 - 不要删除用户正在使用的 `.part` 和 `.resume.json` 断点文件，除非用户明确要求清理。
 - 如果要优化界面，优先保持三步流程清晰：PDF 解析，转换为 MD/TXT/EPUB，MD/TXT 交给 AI 排版。
