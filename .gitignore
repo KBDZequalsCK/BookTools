@@ -1,3 +1,5 @@
 .DS_Store
 *.part
 *.resume.json
+dist/
+*.dmg

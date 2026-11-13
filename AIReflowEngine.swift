@@ -10,13 +10,16 @@ private let legacySettingsDomain = "local.codex.ai-txt-reflow"
 
 struct AIFormatOption {
     let title: String
+    let titleEN: String
     let code: String
     let suffix: String
+
+    var localizedTitle: String { L(title, titleEN) }
 }
 
 let aiFormatOptions = [
-    AIFormatOption(title: "TXT（AI 重排）", code: "txt", suffix: "_ai_reflow.txt"),
-    AIFormatOption(title: "MD（AI Markdown 排版）", code: "md", suffix: "_ai_reflow.md")
+    AIFormatOption(title: "TXT（AI 重排）", titleEN: "TXT (AI reflow)", code: "txt", suffix: "_ai_reflow.txt"),
+    AIFormatOption(title: "MD（AI Markdown 排版）", titleEN: "MD (AI Markdown layout)", code: "md", suffix: "_ai_reflow.md")
 ]
 
 private struct ResumeState: Codable {
@@ -60,12 +63,48 @@ private struct APIErrorResponse: Decodable {
     let error: APIError?
 }
 
+struct APIConnectionTestResult {
+    let model: String
+    let latency: TimeInterval
+    let replyPreview: String
+}
+
+struct APIUtilityError: Error, ExpressibleByStringLiteral {
+    let message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    init(stringLiteral value: String) {
+        message = value
+    }
+}
+
+private struct ModelListResponse: Decodable {
+    struct Model: Decodable {
+        let id: String?
+        let name: String?
+    }
+    let data: [Model]?
+    let models: [Model]?
+}
+
+private struct ChatTestRequest: Encodable {
+    let model: String
+    let messages: [ChatMessage]
+    let temperature: Double
+    let stream: Bool
+    let max_tokens: Int
+}
+
 final class AIReflowEngine {
     private let fileManager = FileManager.default
     private var inputURL: URL?
     private(set) var outputURL: URL?
     private var partURL: URL?
     private var requestTask: URLSessionDataTask?
+    private var auxiliaryTask: URLSessionDataTask?
     private var isCancelling = false
     private var chunks: [String] = []
     private var chunkContexts: [String] = []
@@ -107,24 +146,25 @@ final class AIReflowEngine {
 
     deinit {
         requestTask?.cancel()
+        auxiliaryTask?.cancel()
     }
 
     // MARK: - Public actions
 
     @discardableResult
     func start(input: URL) -> String? {
-        guard requestTask == nil, !isProcessing else { return "AI 排版正在进行中" }
+        guard requestTask == nil, !isProcessing else { return L("AI 排版正在进行中", "AI layout is already running") }
         if availableResumeState != nil {
-            return "检测到未完成任务，请先「继续未完成」；如需重新开始，请先清理断点。"
+            return L("检测到未完成任务，请先「继续未完成」；如需重新开始，请先清理断点。", "An unfinished run was found. Resume it first, or clear the resume data to start over.")
         }
-        guard let endpoint = normalizedEndpoint() else { return "请填写有效的 API 地址" }
-        guard let model = nonEmpty(modelString) else { return "请填写模型" }
-        guard let apiKey = nonEmpty(apiKeyString) else { return "请填写 API Key" }
-        guard (1000...30000).contains(chunkSize) else { return "分块字符数应在 1000 到 30000 之间" }
-        guard let format = aiFormatOptions.first(where: { $0.code == formatCode }) else { return "请选择输出格式" }
+        guard let endpoint = normalizedEndpoint() else { return L("请填写有效的 API 地址", "Enter a valid API URL") }
+        guard let model = nonEmpty(modelString) else { return L("请填写模型", "Enter a model name") }
+        guard let apiKey = nonEmpty(apiKeyString) else { return L("请填写 API Key", "Enter an API Key") }
+        guard (1000...30000).contains(chunkSize) else { return L("分块字符数应在 1000 到 30000 之间", "Chunk size must be between 1000 and 30000 characters") }
+        guard let format = aiFormatOptions.first(where: { $0.code == formatCode }) else { return L("请选择输出格式", "Choose an output format") }
         guard let text = try? String(contentsOf: input, encoding: .utf8),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "无法读取 TXT / MD，或文件内容为空"
+            return L("无法读取 TXT / MD，或文件内容为空", "Could not read the TXT / MD file, or it is empty")
         }
 
         saveAPIKey(apiKey)
@@ -143,22 +183,24 @@ final class AIReflowEngine {
         checkpointURL = resumeStateURL(for: input, formatCode: format.code)
         availableResumeState = nil
 
-        guard let outputURL, let partURL else { return "无法创建输出路径" }
+        guard let outputURL, let partURL else { return L("无法创建输出路径", "Could not create the output path") }
         try? "".write(to: partURL, atomically: true, encoding: .utf8)
         persistCheckpoint()
 
         isProcessing = true
         onStateChange?()
         onProgress?(0)
-        onProgressLabel?("0 / \(chunks.count) 块")
-        onStatus?("正在准备 AI 排版...", .labelColor)
-        onOutput?("完成后会显示保存位置")
-        let chunkMode = inputIsMarkdown ? "Markdown 标题/段落边界" : "普通段落边界"
-        onLog?("输入字符数：\(totalCharacters)")
-        onLog?("分块数量：\(chunks.count)")
-        onLog?("分块方式：\(chunkMode)")
-        onLog?("输出文件：\(outputURL.lastPathComponent)")
-        onLog?("每完成一块都会保存断点。")
+        onProgressLabel?(L("0 / \(chunks.count) 块", "0 / \(chunks.count) chunks"))
+        onStatus?(L("正在准备 AI 排版...", "Preparing AI layout…"), .labelColor)
+        onOutput?(L("完成后会显示保存位置", "The save location will appear here"))
+        let chunkMode = inputIsMarkdown
+            ? L("Markdown 标题/段落边界", "Markdown heading/paragraph boundaries")
+            : L("普通段落边界", "Plain paragraph boundaries")
+        onLog?(L("输入字符数：\(totalCharacters)", "Input characters: \(totalCharacters)"))
+        onLog?(L("分块数量：\(chunks.count)", "Chunks: \(chunks.count)"))
+        onLog?(L("分块方式：\(chunkMode)", "Chunking: \(chunkMode)"))
+        onLog?(L("输出文件：\(outputURL.lastPathComponent)", "Output file: \(outputURL.lastPathComponent)"))
+        onLog?(L("每完成一块都会保存断点。", "A checkpoint is saved after every completed chunk."))
         processNextChunk(endpoint: endpoint, model: model, apiKey: apiKey)
         return nil
     }
@@ -166,23 +208,23 @@ final class AIReflowEngine {
     @discardableResult
     func resume() -> String? {
         guard requestTask == nil, !isProcessing, let state = availableResumeState else {
-            return "没有可继续的断点"
+            return L("没有可继续的断点", "There is no checkpoint to resume")
         }
         let sourceURL = URL(fileURLWithPath: state.inputPath)
-        guard fileManager.fileExists(atPath: sourceURL.path) else { return "找不到断点对应的输入文件" }
-        guard let endpoint = normalizedEndpoint() else { return "请填写有效的 API 地址" }
-        guard let model = nonEmpty(modelString) else { return "请填写模型" }
-        guard let apiKey = nonEmpty(apiKeyString) else { return "请填写 API Key" }
+        guard fileManager.fileExists(atPath: sourceURL.path) else { return L("找不到断点对应的输入文件", "The input file for this checkpoint is missing") }
+        guard let endpoint = normalizedEndpoint() else { return L("请填写有效的 API 地址", "Enter a valid API URL") }
+        guard let model = nonEmpty(modelString) else { return L("请填写模型", "Enter a model name") }
+        guard let apiKey = nonEmpty(apiKeyString) else { return L("请填写 API Key", "Enter an API Key") }
         guard let text = try? String(contentsOf: sourceURL, encoding: .utf8),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "无法读取断点对应的输入文件"
+            return L("无法读取断点对应的输入文件", "Could not read the checkpoint's input file")
         }
         guard let attributes = try? fileManager.attributesOfItem(atPath: sourceURL.path),
               let byteCount = attributes[.size] as? UInt64,
               let modificationDate = attributes[.modificationDate] as? Date,
               byteCount == state.inputByteCount,
               abs(modificationDate.timeIntervalSince1970 - state.inputModificationTime) < 1 else {
-            return "输入文件已经改变，不能安全继续；请重新开始排版"
+            return L("输入文件已经改变，不能安全继续；请重新开始排版", "The input file changed, so resuming is unsafe. Please start over.")
         }
 
         formatCode = state.formatCode
@@ -197,7 +239,7 @@ final class AIReflowEngine {
         guard rebuiltChunks.count == state.totalChunks,
               state.nextChunkIndex <= rebuiltChunks.count,
               state.results.count == rebuiltChunks.count else {
-            return "输入文件的分块方式已经变化，不能安全继续；请重新开始排版"
+            return L("输入文件的分块方式已经变化，不能安全继续；请重新开始排版", "The input file's chunking changed, so resuming is unsafe. Please start over.")
         }
 
         inputURL = sourceURL
@@ -211,7 +253,7 @@ final class AIReflowEngine {
         nextChunkIndex = state.nextChunkIndex
         totalCharacters = text.count
         isCancelling = false
-        guard let partURL else { return "找不到断点临时文件路径" }
+        guard let partURL else { return L("找不到断点临时文件路径", "The checkpoint's temporary file path is missing") }
         try? results.prefix(nextChunkIndex).joined(separator: "\n\n")
             .appending(nextChunkIndex > 0 ? "\n\n" : "")
             .write(to: partURL, atomically: true, encoding: .utf8)
@@ -219,11 +261,11 @@ final class AIReflowEngine {
         isProcessing = true
         onStateChange?()
         onProgress?(Double(nextChunkIndex) / Double(max(chunks.count, 1)) * 100)
-        onProgressLabel?("\(nextChunkIndex) / \(chunks.count) 块")
-        onStatus?("继续处理：从第 \(nextChunkIndex + 1) / \(chunks.count) 块开始", .labelColor)
-        onOutput?("断点产物：\(outputURL?.lastPathComponent ?? "")")
-        onLog?("已恢复断点：已完成 \(nextChunkIndex) / \(chunks.count) 块")
-        onLog?("将只重新请求未完成的块。")
+        onProgressLabel?(L("\(nextChunkIndex) / \(chunks.count) 块", "\(nextChunkIndex) / \(chunks.count) chunks"))
+        onStatus?(L("继续处理：从第 \(nextChunkIndex + 1) / \(chunks.count) 块开始", "Resuming from chunk \(nextChunkIndex + 1) / \(chunks.count)"), .labelColor)
+        onOutput?(L("断点产物：\(outputURL?.lastPathComponent ?? "")", "Checkpoint output: \(outputURL?.lastPathComponent ?? "")"))
+        onLog?(L("已恢复断点：已完成 \(nextChunkIndex) / \(chunks.count) 块", "Checkpoint restored: \(nextChunkIndex) / \(chunks.count) chunks done"))
+        onLog?(L("将只重新请求未完成的块。", "Only unfinished chunks will be requested again."))
         processNextChunk(endpoint: endpoint, model: model, apiKey: apiKey)
         return nil
     }
@@ -231,27 +273,27 @@ final class AIReflowEngine {
     @discardableResult
     func skipChunkAndContinue() -> String? {
         guard requestTask == nil, !isProcessing, let state = availableResumeState else {
-            return "没有可跳过的断点"
+            return L("没有可跳过的断点", "There is no checkpoint to skip")
         }
         let sourceURL = URL(fileURLWithPath: state.inputPath)
-        guard fileManager.fileExists(atPath: sourceURL.path) else { return "找不到断点对应的输入文件" }
-        guard let endpoint = normalizedEndpoint() else { return "请填写有效的 API 地址" }
-        guard let model = nonEmpty(modelString) else { return "请填写模型" }
+        guard fileManager.fileExists(atPath: sourceURL.path) else { return L("找不到断点对应的输入文件", "The input file for this checkpoint is missing") }
+        guard let endpoint = normalizedEndpoint() else { return L("请填写有效的 API 地址", "Enter a valid API URL") }
+        guard let model = nonEmpty(modelString) else { return L("请填写模型", "Enter a model name") }
         guard let apiKey = nonEmpty(apiKeyString) else {
-            return "请填写 API 地址、模型和 API Key，跳过当前块后才能继续处理后续块"
+            return L("请填写 API 地址、模型和 API Key，跳过当前块后才能继续处理后续块", "Fill in the API URL, model, and API Key before skipping so later chunks can continue")
         }
         guard let text = try? String(contentsOf: sourceURL, encoding: .utf8),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "无法读取断点对应的输入文件"
+            return L("无法读取断点对应的输入文件", "Could not read the checkpoint's input file")
         }
         guard let attributes = try? fileManager.attributesOfItem(atPath: sourceURL.path),
               let byteCount = attributes[.size] as? UInt64,
               let modificationDate = attributes[.modificationDate] as? Date,
               byteCount == state.inputByteCount,
               abs(modificationDate.timeIntervalSince1970 - state.inputModificationTime) < 1 else {
-            return "输入文件已经改变，不能安全跳过；请重新开始排版"
+            return L("输入文件已经改变，不能安全跳过；请重新开始排版", "The input file changed, so skipping is unsafe. Please start over.")
         }
-        guard state.nextChunkIndex < state.totalChunks else { return "断点已经没有可跳过的块" }
+        guard state.nextChunkIndex < state.totalChunks else { return L("断点已经没有可跳过的块", "The checkpoint has no chunks left to skip") }
 
         formatCode = state.formatCode
         chunkSize = state.chunkSize
@@ -265,7 +307,7 @@ final class AIReflowEngine {
         guard rebuiltChunks.count == state.totalChunks,
               state.nextChunkIndex < rebuiltChunks.count,
               state.results.count == rebuiltChunks.count else {
-            return "输入文件的分块方式已经变化，不能安全跳过；请重新开始排版"
+            return L("输入文件的分块方式已经变化，不能安全跳过；请重新开始排版", "The input file's chunking changed, so skipping is unsafe. Please start over.")
         }
 
         inputURL = sourceURL
@@ -289,10 +331,10 @@ final class AIReflowEngine {
         isProcessing = true
         onStateChange?()
         onProgress?(Double(nextChunkIndex) / Double(max(chunks.count, 1)) * 100)
-        onProgressLabel?("正在 \(min(nextChunkIndex + 1, chunks.count)) / \(chunks.count) 块")
-        onStatus?("已用原文保留第 \(skippedIndex + 1) 块，继续处理后续块...", .labelColor)
-        onOutput?("断点产物：\(outputURL?.lastPathComponent ?? "")")
-        onLog?("第 \(skippedIndex + 1) 块已跳过，已用原文保留：\(chunkHeadingSummary(chunks[skippedIndex]))")
+        onProgressLabel?(L("正在 \(min(nextChunkIndex + 1, chunks.count)) / \(chunks.count) 块", "Working on \(min(nextChunkIndex + 1, chunks.count)) / \(chunks.count)"))
+        onStatus?(L("已用原文保留第 \(skippedIndex + 1) 块，继续处理后续块...", "Kept chunk \(skippedIndex + 1) as-is; continuing with the remaining chunks…"), .labelColor)
+        onOutput?(L("断点产物：\(outputURL?.lastPathComponent ?? "")", "Checkpoint output: \(outputURL?.lastPathComponent ?? "")"))
+        onLog?(L("第 \(skippedIndex + 1) 块已跳过，已用原文保留：\(chunkHeadingSummary(chunks[skippedIndex]))", "Skipped chunk \(skippedIndex + 1), kept as-is: \(chunkHeadingSummary(chunks[skippedIndex]))"))
 
         if nextChunkIndex >= chunks.count {
             finishSuccessfully()
@@ -307,8 +349,8 @@ final class AIReflowEngine {
             guard availableResumeState != nil else { return }
             cleanupResumeArtifacts()
             availableResumeState = nil
-            onStatus?("未完成任务和临时产物已清理", .systemOrange)
-            onOutput?("本次断点已删除，可以重新开始")
+            onStatus?(L("未完成任务和临时产物已清理", "Unfinished tasks and temporary files cleaned up"), .systemOrange)
+            onOutput?(L("本次断点已删除，可以重新开始", "The checkpoint was deleted; you can start again"))
             onProgressLabel?("")
             onStateChange?()
             onResumeStateChanged?()
@@ -320,7 +362,7 @@ final class AIReflowEngine {
         cleanupResumeArtifacts()
         availableResumeState = nil
         isProcessing = false
-        onStatus?("已取消，未完成产物已清理", .systemOrange)
+        onStatus?(L("已取消，未完成产物已清理", "Cancelled — unfinished output cleaned up"), .systemOrange)
         onProgressLabel?("")
         onStateChange?()
         onResumeStateChanged?()
@@ -353,10 +395,168 @@ final class AIReflowEngine {
         isCancelling = true
         requestTask?.cancel()
         requestTask = nil
+        auxiliaryTask?.cancel()
+        auxiliaryTask = nil
         if hadActiveRequest || processHasActiveWork {
             persistCheckpoint()
         }
         isProcessing = false
+    }
+
+    // MARK: - 接口测试与模型列表
+
+    func saveCurrentSettings() {
+        if let apiKey = nonEmpty(apiKeyString) {
+            saveAPIKey(apiKey)
+        }
+        saveSettings()
+    }
+
+    func testConnection(completion: @escaping (Result<APIConnectionTestResult, APIUtilityError>) -> Void) {
+        guard auxiliaryTask == nil else {
+            completion(.failure(APIUtilityError(L("正在获取模型或测试接口，请稍候", "A model fetch or API test is already running — please wait"))))
+            return
+        }
+        guard let endpoint = normalizedEndpoint() else {
+            completion(.failure(APIUtilityError(L("请填写有效的 API 地址", "Enter a valid API URL"))))
+            return
+        }
+        guard let model = nonEmpty(modelString) else {
+            completion(.failure(APIUtilityError(L("请填写模型", "Enter a model name"))))
+            return
+        }
+        guard let apiKey = nonEmpty(apiKeyString) else {
+            completion(.failure(APIUtilityError(L("请填写 API Key", "Enter an API Key"))))
+            return
+        }
+
+        let body = ChatTestRequest(
+            model: model,
+            messages: [
+                ChatMessage(role: "system", content: "你是接口连通性测试助手。"),
+                ChatMessage(role: "user", content: "请只回复 OK。")
+            ],
+            temperature: 0,
+            stream: false,
+            max_tokens: 16
+        )
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        do {
+            request.httpBody = try JSONEncoder().encode(body)
+        } catch {
+            completion(.failure(APIUtilityError(L("无法生成测试请求：\(error.localizedDescription)", "Could not build the test request: \(error.localizedDescription)"))))
+            return
+        }
+
+        let startedAt = Date()
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.auxiliaryTask = nil
+                if let error {
+                    completion(.failure(APIUtilityError(L("无法连接 API：\(error.localizedDescription)", "Could not reach the API: \(error.localizedDescription)"))))
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    completion(.failure(APIUtilityError(L("API 没有返回有效的 HTTP 响应", "The API did not return a valid HTTP response"))))
+                    return
+                }
+                guard let data else {
+                    completion(.failure(APIUtilityError(L("API 返回为空", "The API returned an empty response"))))
+                    return
+                }
+                guard (200...299).contains(http.statusCode) else {
+                    completion(.failure(APIUtilityError("HTTP \(http.statusCode)：\(self.apiErrorMessage(from: data))")))
+                    return
+                }
+                do {
+                    let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
+                    let reply = decoded.choices.first?.message.content?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    completion(.success(APIConnectionTestResult(
+                        model: model,
+                        latency: Date().timeIntervalSince(startedAt),
+                        replyPreview: reply.isEmpty ? L("（模型未返回文本）", "(the model returned no text)") : String(reply.prefix(120))
+                    )))
+                } catch {
+                    completion(.failure(APIUtilityError(L("接口返回不是 OpenAI Chat Completions 格式：\(error.localizedDescription)", "The response is not OpenAI Chat Completions format: \(error.localizedDescription)"))))
+                }
+            }
+        }
+        auxiliaryTask = task
+        task.resume()
+    }
+
+    func fetchAvailableModels(completion: @escaping (Result<[String], APIUtilityError>) -> Void) {
+        guard auxiliaryTask == nil else {
+            completion(.failure(APIUtilityError(L("正在获取模型或测试接口，请稍候", "A model fetch or API test is already running — please wait"))))
+            return
+        }
+        guard let endpoint = normalizedEndpoint() else {
+            completion(.failure(APIUtilityError(L("请填写有效的 API 地址", "Enter a valid API URL"))))
+            return
+        }
+        guard let apiKey = nonEmpty(apiKeyString) else {
+            completion(.failure(APIUtilityError(L("请填写 API Key", "Enter an API Key"))))
+            return
+        }
+
+        let baseURL = endpoint
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let modelsURL = baseURL.appendingPathComponent("models")
+        var request = URLRequest(url: modelsURL)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.auxiliaryTask = nil
+                if let error {
+                    completion(.failure(APIUtilityError(L("无法连接 API：\(error.localizedDescription)", "Could not reach the API: \(error.localizedDescription)"))))
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else {
+                    completion(.failure(APIUtilityError(L("API 没有返回有效的 HTTP 响应", "The API did not return a valid HTTP response"))))
+                    return
+                }
+                guard let data else {
+                    completion(.failure(APIUtilityError(L("API 返回为空", "The API returned an empty response"))))
+                    return
+                }
+                guard (200...299).contains(http.statusCode) else {
+                    completion(.failure(APIUtilityError("HTTP \(http.statusCode)：\(self.apiErrorMessage(from: data))")))
+                    return
+                }
+                do {
+                    let decoded = try JSONDecoder().decode(ModelListResponse.self, from: data)
+                    let rawIDs = (decoded.data ?? []).compactMap { $0.id ?? $0.name }
+                        + (decoded.models ?? []).compactMap { $0.id ?? $0.name }
+                    var seen = Set<String>()
+                    let ids = rawIDs
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty && seen.insert($0).inserted }
+                        .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+                    guard !ids.isEmpty else {
+                        completion(.failure(APIUtilityError(L("接口返回的模型列表为空，可能不支持 /models", "The API returned an empty model list; /models may be unsupported"))))
+                        return
+                    }
+                    completion(.success(ids))
+                } catch {
+                    completion(.failure(APIUtilityError(L("无法解析模型列表：\(error.localizedDescription)", "Could not parse the model list: \(error.localizedDescription)"))))
+                }
+            }
+        }
+        auxiliaryTask = task
+        task.resume()
     }
 
     // MARK: - Networking
@@ -371,8 +571,8 @@ final class AIReflowEngine {
 
         let index = nextChunkIndex
         let text = chunks[index]
-        onStatus?("AI 正在重排第 \(index + 1) / \(chunks.count) 块...", .labelColor)
-        onProgressLabel?("正在 \(index + 1) / \(chunks.count) 块")
+        onStatus?(L("AI 正在重排第 \(index + 1) / \(chunks.count) 块...", "AI is reflowing chunk \(index + 1) / \(chunks.count)…"), .labelColor)
+        onProgressLabel?(L("正在 \(index + 1) / \(chunks.count) 块", "Working on \(index + 1) / \(chunks.count)"))
 
         let systemPrompt = prompt(for: outputFormatCode)
         let chunkContext = markdownChunkContext(for: index)
@@ -405,7 +605,7 @@ final class AIReflowEngine {
         do {
             request.httpBody = try JSONEncoder().encode(body)
         } catch {
-            fail("无法生成 API 请求：\(error.localizedDescription)")
+            fail(L("无法生成 API 请求：\(error.localizedDescription)", "Could not build the API request: \(error.localizedDescription)"))
             return
         }
 
@@ -417,23 +617,23 @@ final class AIReflowEngine {
                     return
                 }
                 if let error {
-                    self.fail("API 请求失败：\(error.localizedDescription)")
+                    self.fail(L("API 请求失败：\(error.localizedDescription)", "API request failed: \(error.localizedDescription)"))
                     return
                 }
                 guard let http = response as? HTTPURLResponse else {
-                    self.fail("API 没有返回有效的 HTTP 响应")
+                    self.fail(L("API 没有返回有效的 HTTP 响应", "The API did not return a valid HTTP response"))
                     return
                 }
                 guard let data else {
-                    self.fail("API 返回为空")
+                    self.fail(L("API 返回为空", "The API returned an empty response"))
                     return
                 }
                 guard (200...299).contains(http.statusCode) else {
-                    let message = "API 返回 HTTP \(http.statusCode)：\(self.apiErrorMessage(from: data))"
+                    let message = "HTTP \(http.statusCode)：\(self.apiErrorMessage(from: data))"
                     if http.statusCode == 400 {
-                        self.fail("API 内容安全过滤拒绝第 \(index + 1) / \(self.chunks.count) 块；已完成 \(self.nextChunkIndex) 块。")
-                        self.onLog?("接口原始错误：\(message)")
-                        self.onLog?("失败块标题：\(self.chunkHeadingSummary(self.chunks[index]))")
+                        self.fail(L("API 内容安全过滤拒绝第 \(index + 1) / \(self.chunks.count) 块；已完成 \(self.nextChunkIndex) 块。", "The API's content filter rejected chunk \(index + 1) / \(self.chunks.count); \(self.nextChunkIndex) chunks are done."))
+                        self.onLog?(L("接口原始错误：\(message)", "Raw API error: \(message)"))
+                        self.onLog?(L("失败块标题：\(self.chunkHeadingSummary(self.chunks[index]))", "Failed chunk headings: \(self.chunkHeadingSummary(self.chunks[index]))"))
                     } else {
                         self.fail(message)
                     }
@@ -444,18 +644,18 @@ final class AIReflowEngine {
                     guard let content = result.choices.first?.message.content?
                         .trimmingCharacters(in: .whitespacesAndNewlines),
                           !content.isEmpty else {
-                        self.fail("API 返回中没有可用文本")
+                        self.fail(L("API 返回中没有可用文本", "The API response contains no usable text"))
                         return
                     }
                     self.results[index] = content
                     self.nextChunkIndex += 1
                     self.persistPartialResult()
-                    self.onLog?("第 \(index + 1) 块完成，\(content.count) 字符")
+                    self.onLog?(L("第 \(index + 1) 块完成，\(content.count) 字符", "Chunk \(index + 1) done, \(content.count) characters"))
                     self.onProgress?(Double(self.nextChunkIndex) / Double(max(self.chunks.count, 1)) * 100)
-                    self.onProgressLabel?("\(self.nextChunkIndex) / \(self.chunks.count) 块")
+                    self.onProgressLabel?(L("\(self.nextChunkIndex) / \(self.chunks.count) 块", "\(self.nextChunkIndex) / \(self.chunks.count) chunks"))
                     self.processNextChunk(endpoint: endpoint, model: model, apiKey: apiKey)
                 } catch {
-                    self.fail("无法解析 API 返回：\(error.localizedDescription)")
+                    self.fail(L("无法解析 API 返回：\(error.localizedDescription)", "Could not parse the API response: \(error.localizedDescription)"))
                 }
             }
         }
@@ -465,7 +665,7 @@ final class AIReflowEngine {
 
     private func finishSuccessfully() {
         guard let outputURL else {
-            fail("没有输出路径")
+            fail(L("没有输出路径", "There is no output path"))
             return
         }
         let result = results.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
@@ -476,14 +676,14 @@ final class AIReflowEngine {
             availableResumeState = nil
             isProcessing = false
             onProgress?(100)
-            onProgressLabel?("\(chunks.count) / \(chunks.count) 块")
-            onStatus?("AI 排版完成", .systemGreen)
+            onProgressLabel?(L("\(chunks.count) / \(chunks.count) 块", "\(chunks.count) / \(chunks.count) chunks"))
+            onStatus?(L("AI 排版完成", "AI layout complete"), .systemGreen)
             self.outputURL = outputURL
-            onOutput?("产物位置：\(outputURL.path)")
+            onOutput?(L("产物位置：\(outputURL.path)", "Output: \(outputURL.path)"))
             onStateChange?()
             onResumeStateChanged?()
         } catch {
-            fail("无法保存输出文件：\(error.localizedDescription)")
+            fail(L("无法保存输出文件：\(error.localizedDescription)", "Could not save the output file: \(error.localizedDescription)"))
         }
     }
 
@@ -500,8 +700,8 @@ final class AIReflowEngine {
         persistCheckpoint()
         isProcessing = false
         onStatus?(message, .systemRed)
-        onLog?("\(message)\n已保留已完成块，可点击「继续未完成」重试当前失败块。")
-        onOutput?("断点已保留：已完成 \(nextChunkIndex) / \(chunks.count) 块")
+        onLog?(L("\(message)\n已保留已完成块，可点击「继续未完成」重试当前失败块。", "\(message)\nCompleted chunks were kept. Click \"Resume\" to retry the failed chunk."))
+        onOutput?(L("断点已保留：已完成 \(nextChunkIndex) / \(chunks.count) 块", "Checkpoint kept: \(nextChunkIndex) / \(chunks.count) chunks done"))
         loadResumeState(for: inputURL)
     }
 
@@ -995,7 +1195,7 @@ final class AIReflowEngine {
            !message.isEmpty {
             return message
         }
-        return String(data: data, encoding: .utf8) ?? "未知错误"
+        return String(data: data, encoding: .utf8) ?? L("未知错误", "Unknown error")
     }
 
     private func chunkHeadingSummary(_ chunk: String) -> String {
@@ -1004,7 +1204,9 @@ final class AIReflowEngine {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { $0.hasPrefix("#") }
             .prefix(6)
-        return headings.isEmpty ? "未检测到 Markdown 标题" : headings.joined(separator: "；")
+        return headings.isEmpty
+            ? L("未检测到 Markdown 标题", "No Markdown headings detected")
+            : headings.joined(separator: L("；", "; "))
     }
 
     // MARK: - Saved settings
