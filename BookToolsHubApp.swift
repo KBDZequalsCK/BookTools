@@ -16,6 +16,20 @@ private struct FormatOption {
     let suffix: String
 }
 
+private enum AppearanceMode: String, CaseIterable {
+    case system
+    case light
+    case dark
+
+    var title: String {
+        switch self {
+        case .system: return "跟随系统"
+        case .light: return "浅色"
+        case .dark: return "深色"
+        }
+    }
+}
+
 private let formatOptions = [
     FormatOption(title: "MD（推荐，便于 AI 排版）", code: "md", suffix: "_reflow.md"),
     FormatOption(title: "TXT（纯文字）", code: "txt", suffix: "_ocr.txt"),
@@ -53,6 +67,8 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private let parseSettingsRows = NSStackView()
     private let parseSettingsToggle = BTButton(title: "解析设置", symbol: "chevron.right", style: .ghost, height: 22)
     private let parseSummaryLabel = BTUI.label("识别语言、解析方式与输出格式", size: 11, color: .tertiaryLabelColor)
+    private let appearancePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let appearanceDefaultsKey = "appearanceMode"
 
     private let headerIconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: appTitle)
@@ -115,6 +131,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         super.init(window: window)
         window.delegate = self
         buildInterface()
+        loadSavedAppearance()
         window.center()
         discoverLanguages()
         loadSavedMinerUToken()
@@ -426,20 +443,34 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(subtitleLabel)
 
+        appearancePopup.translatesAutoresizingMaskIntoConstraints = false
+        appearancePopup.controlSize = .regular
+        appearancePopup.font = NSFont.systemFont(ofSize: 12)
+        appearancePopup.addItems(withTitles: AppearanceMode.allCases.map(\.title))
+        appearancePopup.target = self
+        appearancePopup.action = #selector(appearanceSelectionChanged)
+        appearancePopup.toolTip = "外观：跟随系统、浅色或深色"
+        header.addSubview(appearancePopup)
+
         NSLayoutConstraint.activate([
             headerIconView.leadingAnchor.constraint(equalTo: header.leadingAnchor),
             headerIconView.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             headerIconView.widthAnchor.constraint(equalToConstant: 38),
             headerIconView.heightAnchor.constraint(equalToConstant: 38),
 
+            appearancePopup.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -2),
+            appearancePopup.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            appearancePopup.widthAnchor.constraint(equalToConstant: 104),
+            appearancePopup.heightAnchor.constraint(equalToConstant: 26),
+
             titleLabel.leadingAnchor.constraint(equalTo: headerIconView.trailingAnchor, constant: 12),
             titleLabel.topAnchor.constraint(equalTo: header.topAnchor),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: appearancePopup.leadingAnchor, constant: -12),
 
             subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
             subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
             subtitleLabel.bottomAnchor.constraint(equalTo: header.bottomAnchor),
-            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: appearancePopup.leadingAnchor, constant: -12),
 
             header.heightAnchor.constraint(equalToConstant: 46)
         ])
@@ -1175,6 +1206,35 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         aiSettingsStack.isHidden = !aiSettingsExpanded
         updateParseSettingsToggle()
         updateAISettingsToggle()
+    }
+
+    private func loadSavedAppearance() {
+        let raw = UserDefaults.standard.string(forKey: appearanceDefaultsKey) ?? AppearanceMode.system.rawValue
+        let mode = AppearanceMode(rawValue: raw) ?? .system
+        applyAppearance(mode, persist: false)
+    }
+
+    private func applyAppearance(_ mode: AppearanceMode, persist: Bool) {
+        switch mode {
+        case .system:
+            NSApp.appearance = nil
+        case .light:
+            NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark:
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+        if let index = AppearanceMode.allCases.firstIndex(where: { $0.rawValue == mode.rawValue }) {
+            appearancePopup.selectItem(at: index)
+        }
+        if persist {
+            UserDefaults.standard.set(mode.rawValue, forKey: appearanceDefaultsKey)
+        }
+    }
+
+    @objc private func appearanceSelectionChanged() {
+        let index = appearancePopup.indexOfSelectedItem
+        guard index >= 0, index < AppearanceMode.allCases.count else { return }
+        applyAppearance(AppearanceMode.allCases[index], persist: true)
     }
 
     private func updateParseSettingsToggle() {
