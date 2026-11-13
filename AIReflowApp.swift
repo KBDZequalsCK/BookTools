@@ -62,106 +62,7 @@ private struct APIErrorResponse: Decodable {
     let error: APIError?
 }
 
-protocol DropViewDelegate: AnyObject {
-    func dropView(_ view: DropView, received url: URL)
-    func dropViewWasDoubleClicked(_ view: DropView)
-}
-
-protocol RootViewDelegate: AnyObject {
-    func rootViewWasDoubleClicked(_ view: RootView)
-}
-
-final class RootView: NSView {
-    weak var delegate: RootViewDelegate?
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount >= 2 {
-            delegate?.rootViewWasDoubleClicked(self)
-        }
-        super.mouseDown(with: event)
-    }
-}
-
-final class DropView: NSView {
-    weak var delegate: DropViewDelegate?
-    var titleText = "把 TXT / MD 文件拖到这里"
-    var subtitleText = "也可以双击此区域选择文件"
-    var isHighlighted = false {
-        didSet { needsDisplay = true }
-    }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        registerForDraggedTypes([.fileURL])
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        registerForDraggedTypes([.fileURL])
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let box = bounds.insetBy(dx: 2, dy: 2)
-        let path = NSBezierPath(roundedRect: box, xRadius: 14, yRadius: 14)
-        (isHighlighted ? NSColor.controlAccentColor.withAlphaComponent(0.18) : NSColor.controlBackgroundColor).setFill()
-        path.fill()
-        (isHighlighted ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
-        path.lineWidth = isHighlighted ? 2.5 : 1.2
-        path.stroke()
-
-        let titleAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 20, weight: .semibold),
-            .foregroundColor: NSColor.labelColor
-        ]
-        let subtitleAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13),
-            .foregroundColor: NSColor.secondaryLabelColor
-        ]
-        let titleSize = titleText.size(withAttributes: titleAttributes)
-        let subtitleSize = subtitleText.size(withAttributes: subtitleAttributes)
-        titleText.draw(
-            at: NSPoint(x: box.midX - titleSize.width / 2, y: box.midY + 8),
-            withAttributes: titleAttributes
-        )
-        subtitleText.draw(
-            at: NSPoint(x: box.midX - subtitleSize.width / 2, y: box.midY - 22),
-            withAttributes: subtitleAttributes
-        )
-    }
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard firstTextURL(from: sender.draggingPasteboard) != nil else { return [] }
-        isHighlighted = true
-        return .copy
-    }
-
-    override func draggingExited(_ sender: NSDraggingInfo?) {
-        isHighlighted = false
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        isHighlighted = false
-        guard let url = firstTextURL(from: sender.draggingPasteboard) else { return false }
-        delegate?.dropView(self, received: url)
-        return true
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount >= 2 {
-            delegate?.dropViewWasDoubleClicked(self)
-        }
-        super.mouseDown(with: event)
-    }
-
-    private func firstTextURL(from pasteboard: NSPasteboard) -> URL? {
-        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] else {
-            return nil
-        }
-        return urls.first(where: { supportedInputExtensions.contains($0.pathExtension.lowercased()) })
-    }
-}
-
-final class AIReflowWindowController: NSWindowController, NSWindowDelegate, RootViewDelegate, DropViewDelegate {
+final class AIReflowWindowController: NSWindowController, NSWindowDelegate, FileDropZoneDelegate {
     private let fileManager = FileManager.default
     private var inputURL: URL?
     private var outputURL: URL?
@@ -177,39 +78,52 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
     private var checkpointURL: URL?
     private var availableResumeState: ResumeState?
 
-    private let titleLabel = NSTextField(labelWithString: appTitle)
-    private let fileLabel = NSTextField(labelWithString: "尚未选择 TXT / MD")
-    private let outputLabel = NSTextField(labelWithString: "完成后会显示保存位置")
-    private let statusLabel = NSTextField(labelWithString: "请选择 TXT / MD 文件开始")
-    private let progressLabel = NSTextField(labelWithString: "")
+    private let headerIconView = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "AI 排版")
+    private let subtitleLabel = BTUI.label(
+        "把 TXT / MD 交给 AI 清理、分章并重排 · 支持断点续传",
+        size: 12,
+        color: .secondaryLabelColor
+    )
+    private let fileLabel = BTUI.label("尚未选择 TXT / MD", size: 11, color: .tertiaryLabelColor)
+    private let outputLabel = BTUI.label("完成后会显示保存位置", size: 11, color: .secondaryLabelColor)
+    private let statusLabel = BTUI.label("请选择 TXT / MD 文件开始", size: 13, weight: .medium)
+    private let progressLabel = BTUI.label("", size: 11, color: .secondaryLabelColor, alignment: .right)
     private let apiURLField = NSTextField(string: "https://api.openai.com/v1/chat/completions")
     private let modelField = NSTextField(string: "gpt-4o-mini")
     private let apiKeyField = NSSecureTextField(string: "")
     private let chunkSizeField = NSTextField(string: "8000")
     private let formatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let progressIndicator = NSProgressIndicator(frame: .zero)
-    private let startButton = NSButton(frame: .zero)
-    private let cancelButton = NSButton(frame: .zero)
-    private let openOutputButton = NSButton(frame: .zero)
-    private let resumeButton = NSButton(frame: .zero)
-    private let skipButton = NSButton(frame: .zero)
+    private let progressBar = BTProgressBar()
+    private let startButton = BTButton(title: "开始 AI 排版", symbol: "wand.and.stars", style: .primary, height: 30)
+    private let resumeButton = BTButton(title: "继续未完成", symbol: "play.circle", style: .accent, height: 30)
+    private let skipButton = BTButton(title: "跳过当前块", symbol: "forward.end", style: .secondary, height: 30)
+    private let cancelButton = BTButton(title: "终止并清理", symbol: "stop.circle", style: .destructive, height: 30)
+    private let openOutputButton = BTButton(title: "打开输出目录", symbol: "folder", style: .secondary, height: 30)
+    private let chooseButton = BTButton(title: "选择文件", symbol: "folder", style: .ghost, height: 28)
     private let logView = NSTextView(frame: .zero)
-    private let dropView = DropView(frame: .zero)
-    private var rootView: RootView!
+    private let dropView = FileDropZoneView(
+        acceptedExtensions: ["txt", "md", "markdown"],
+        title: "把 TXT / MD 文件拖到这里",
+        subtitle: "也可以双击此区域选择文件"
+    )
 
     init(initialInput: URL? = nil) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = appTitle
-        window.minSize = NSSize(width: 700, height: 650)
+        window.title = ""
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.minSize = NSSize(width: 820, height: 780)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
         buildInterface()
+        window.center()
         loadSavedSettings()
         loadSavedAPIKey()
         if let initialInput {
@@ -229,15 +143,11 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
         shutdownForTermination()
     }
 
-    func rootViewWasDoubleClicked(_ view: RootView) {
+    func dropZoneWasDoubleClicked(_ view: FileDropZoneView) {
         chooseFile()
     }
 
-    func dropViewWasDoubleClicked(_ view: DropView) {
-        chooseFile()
-    }
-
-    func dropView(_ view: DropView, received url: URL) {
+    func dropZone(_ view: FileDropZoneView, received url: URL) {
         setInput(url)
     }
 
@@ -327,8 +237,7 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
         try? "".write(to: partURL, atomically: true, encoding: .utf8)
         persistCheckpoint()
         updateControls(isRunning: true)
-        progressIndicator.isIndeterminate = false
-        progressIndicator.doubleValue = 0
+        setProgress(0)
         progressLabel.stringValue = "0 / \(chunks.count) 块"
         statusLabel.stringValue = "正在准备 AI 排版..."
         statusLabel.textColor = .labelColor
@@ -397,8 +306,7 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
         }
         try? results.prefix(nextChunkIndex).joined(separator: "\n\n").appending(nextChunkIndex > 0 ? "\n\n" : "").write(to: partURL, atomically: true, encoding: .utf8)
         updateControls(isRunning: true)
-        progressIndicator.isIndeterminate = false
-        progressIndicator.doubleValue = Double(nextChunkIndex) / Double(max(chunks.count, 1)) * 100
+        setProgress(Double(nextChunkIndex) / Double(max(chunks.count, 1)) * 100)
         progressLabel.stringValue = "\(nextChunkIndex) / \(chunks.count) 块"
         statusLabel.stringValue = "继续处理：从第 \(nextChunkIndex + 1) / \(chunks.count) 块开始"
         statusLabel.textColor = .labelColor
@@ -472,8 +380,7 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
         saveSettings(format: formatOptions[formatIndex], chunkSize: state.chunkSize)
         persistPartialResult()
         updateControls(isRunning: true)
-        progressIndicator.isIndeterminate = false
-        progressIndicator.doubleValue = Double(nextChunkIndex) / Double(max(chunks.count, 1)) * 100
+        setProgress(Double(nextChunkIndex) / Double(max(chunks.count, 1)) * 100)
         progressLabel.stringValue = "正在 \(min(nextChunkIndex + 1, chunks.count)) / \(chunks.count) 块"
         statusLabel.stringValue = "已用原文保留第 \(skippedIndex + 1) 块，继续处理后续块..."
         statusLabel.textColor = .labelColor
@@ -516,144 +423,322 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
         NSWorkspace.shared.activateFileViewerSelecting([target])
     }
 
+    // MARK: - Interface
+
     private func buildInterface() {
-        guard let contentView = window?.contentView else { return }
-        rootView = RootView(frame: contentView.bounds)
-        rootView.autoresizingMask = [.width, .height]
-        rootView.delegate = self
-        window?.contentView = rootView
+        guard let content = window?.contentView else { return }
 
-        titleLabel.font = NSFont.systemFont(ofSize: 24, weight: .bold)
-        titleLabel.frame = NSRect(x: 28, y: 642, width: 700, height: 30)
-        titleLabel.autoresizingMask = [.minYMargin, .width]
-        rootView.addSubview(titleLabel)
+        let root = NSView(frame: content.bounds)
+        root.autoresizingMask = [.width, .height]
+        window?.contentView = root
 
-        let explanation = NSTextField(labelWithString: "将 TXT / MD 文字交给 AI 重排，可输出纯文本或 Markdown")
-        explanation.font = NSFont.systemFont(ofSize: 13)
-        explanation.textColor = .secondaryLabelColor
-        explanation.frame = NSRect(x: 30, y: 616, width: 700, height: 20)
-        explanation.autoresizingMask = [.minYMargin, .width]
-        rootView.addSubview(explanation)
+        let mainStack = NSStackView()
+        mainStack.orientation = .vertical
+        mainStack.alignment = .leading
+        mainStack.spacing = 10
+        mainStack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(mainStack)
 
-        dropView.frame = NSRect(x: 28, y: 492, width: 704, height: 104)
-        dropView.autoresizingMask = [.width, .minYMargin]
-        dropView.delegate = self
-        rootView.addSubview(dropView)
+        NSLayoutConstraint.activate([
+            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
+            mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -18)
+        ])
 
-        fileLabel.font = NSFont.systemFont(ofSize: 13)
-        fileLabel.lineBreakMode = .byTruncatingMiddle
-        fileLabel.frame = NSRect(x: 30, y: 466, width: 704, height: 20)
-        fileLabel.autoresizingMask = [.width, .minYMargin]
-        rootView.addSubview(fileLabel)
+        addFullWidth(makeHeader(), to: mainStack, spacingAfter: 4)
+        addFullWidth(makeDropCard(), to: mainStack)
+        addFullWidth(makeSettingsCard(), to: mainStack)
+        addFullWidth(makeStatusStack(), to: mainStack, spacingAfter: 2)
 
-        addLabel("API 地址：", frame: NSRect(x: 30, y: 430, width: 80, height: 22))
-        apiURLField.frame = NSRect(x: 112, y: 428, width: 620, height: 24)
-        apiURLField.autoresizingMask = [.width, .minYMargin]
-        rootView.addSubview(apiURLField)
+        let logCard = makeLogCard()
+        logCard.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        addFullWidth(logCard, to: mainStack)
 
-        addLabel("模型：", frame: NSRect(x: 30, y: 396, width: 80, height: 22))
-        modelField.frame = NSRect(x: 112, y: 394, width: 250, height: 24)
-        modelField.autoresizingMask = [.minYMargin]
-        rootView.addSubview(modelField)
-
-        addLabel("API Key：", frame: NSRect(x: 380, y: 396, width: 75, height: 22))
-        apiKeyField.frame = NSRect(x: 457, y: 394, width: 275, height: 24)
-        apiKeyField.autoresizingMask = [.width, .minYMargin]
-        rootView.addSubview(apiKeyField)
-
-        addLabel("分块字符数：", frame: NSRect(x: 30, y: 362, width: 90, height: 22))
-        chunkSizeField.frame = NSRect(x: 122, y: 360, width: 100, height: 24)
-        chunkSizeField.autoresizingMask = [.minYMargin]
-        rootView.addSubview(chunkSizeField)
-
-        addLabel("输出：", frame: NSRect(x: 255, y: 362, width: 55, height: 22))
-        formatPopup.frame = NSRect(x: 312, y: 360, width: 220, height: 26)
-        formatPopup.addItems(withTitles: formatOptions.map(\.title))
-        rootView.addSubview(formatPopup)
-
-        progressIndicator.frame = NSRect(x: 30, y: 322, width: 704, height: 18)
-        progressIndicator.autoresizingMask = [.width, .minYMargin]
-        progressIndicator.style = .bar
-        progressIndicator.isIndeterminate = false
-        rootView.addSubview(progressIndicator)
-
-        statusLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        statusLabel.frame = NSRect(x: 30, y: 296, width: 560, height: 20)
-        statusLabel.autoresizingMask = [.minYMargin, .width]
-        rootView.addSubview(statusLabel)
-
-        progressLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        progressLabel.textColor = .secondaryLabelColor
-        progressLabel.alignment = .right
-        progressLabel.frame = NSRect(x: 600, y: 296, width: 132, height: 20)
-        progressLabel.autoresizingMask = [.minYMargin, .minXMargin]
-        rootView.addSubview(progressLabel)
-
-        outputLabel.font = NSFont.systemFont(ofSize: 12)
-        outputLabel.textColor = .secondaryLabelColor
-        outputLabel.lineBreakMode = .byTruncatingMiddle
-        outputLabel.frame = NSRect(x: 30, y: 270, width: 704, height: 18)
-        outputLabel.autoresizingMask = [.width, .minYMargin]
-        rootView.addSubview(outputLabel)
-
-        let logScroll = NSScrollView(frame: NSRect(x: 30, y: 74, width: 704, height: 178))
-        logScroll.autoresizingMask = [.width, .minYMargin]
-        logScroll.hasVerticalScroller = true
-        logScroll.borderType = .bezelBorder
-        logView.isEditable = false
-        logView.isSelectable = true
-        logView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        logView.textColor = .secondaryLabelColor
-        logScroll.documentView = logView
-        rootView.addSubview(logScroll)
-
-        startButton.title = "开始 AI 排版"
-        startButton.target = self
-        startButton.action = #selector(startProcessing)
-        startButton.frame = NSRect(x: 30, y: 28, width: 125, height: 30)
-        startButton.autoresizingMask = [.minYMargin]
-        startButton.isEnabled = false
-        rootView.addSubview(startButton)
-
-        resumeButton.title = "继续未完成"
-        resumeButton.target = self
-        resumeButton.action = #selector(resumeProcessing)
-        resumeButton.frame = NSRect(x: 165, y: 28, width: 125, height: 30)
-        resumeButton.autoresizingMask = [.minYMargin]
-        resumeButton.isEnabled = false
-        rootView.addSubview(resumeButton)
-
-        skipButton.title = "跳过当前块"
-        skipButton.target = self
-        skipButton.action = #selector(skipCurrentChunkAndContinue)
-        skipButton.frame = NSRect(x: 300, y: 28, width: 125, height: 30)
-        skipButton.autoresizingMask = [.minYMargin]
-        skipButton.isEnabled = false
-        rootView.addSubview(skipButton)
-
-        cancelButton.title = "终止并清理"
-        cancelButton.target = self
-        cancelButton.action = #selector(cancelProcessing)
-        cancelButton.frame = NSRect(x: 435, y: 28, width: 125, height: 30)
-        cancelButton.autoresizingMask = [.minYMargin]
-        cancelButton.isEnabled = false
-        rootView.addSubview(cancelButton)
-
-        openOutputButton.title = "打开输出目录"
-        openOutputButton.target = self
-        openOutputButton.action = #selector(openOutputDirectory)
-        openOutputButton.frame = NSRect(x: 570, y: 28, width: 140, height: 30)
-        openOutputButton.autoresizingMask = [.minYMargin]
-        openOutputButton.isEnabled = false
-        rootView.addSubview(openOutputButton)
+        addFullWidth(makeBottomBar(), to: mainStack, spacingAfter: 0)
     }
 
-    private func addLabel(_ title: String, frame: NSRect) {
-        let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        label.frame = frame
-        label.autoresizingMask = [.minYMargin]
-        rootView.addSubview(label)
+    private func makeHeader() -> NSView {
+        let header = NSView()
+
+        headerIconView.translatesAutoresizingMaskIntoConstraints = false
+        headerIconView.imageScaling = .scaleProportionallyDown
+        headerIconView.image = NSImage(named: "AppIcon") ?? NSApp.applicationIconImage
+        header.addSubview(headerIconView)
+
+        titleLabel.font = NSFont.systemFont(ofSize: 22, weight: .bold)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(titleLabel)
+
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(subtitleLabel)
+
+        NSLayoutConstraint.activate([
+            headerIconView.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            headerIconView.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            headerIconView.widthAnchor.constraint(equalToConstant: 38),
+            headerIconView.heightAnchor.constraint(equalToConstant: 38),
+
+            titleLabel.leadingAnchor.constraint(equalTo: headerIconView.trailingAnchor, constant: 12),
+            titleLabel.topAnchor.constraint(equalTo: header.topAnchor),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor),
+
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            subtitleLabel.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor),
+
+            header.heightAnchor.constraint(equalToConstant: 46)
+        ])
+        return header
+    }
+
+    private func makeDropCard() -> NSView {
+        let card = BTCardView(insets: NSEdgeInsets(top: 12, left: 12, bottom: 10, right: 12))
+
+        dropView.delegate = self
+        dropView.translatesAutoresizingMaskIntoConstraints = false
+        dropView.heightAnchor.constraint(equalToConstant: 70).isActive = true
+
+        let chooseRow = NSView()
+        fileLabel.translatesAutoresizingMaskIntoConstraints = false
+        chooseButton.translatesAutoresizingMaskIntoConstraints = false
+        chooseRow.addSubview(fileLabel)
+        chooseRow.addSubview(chooseButton)
+
+        NSLayoutConstraint.activate([
+            fileLabel.leadingAnchor.constraint(equalTo: chooseRow.leadingAnchor, constant: 4),
+            fileLabel.centerYAnchor.constraint(equalTo: chooseRow.centerYAnchor),
+            fileLabel.trailingAnchor.constraint(lessThanOrEqualTo: chooseButton.leadingAnchor, constant: -10),
+
+            chooseButton.trailingAnchor.constraint(equalTo: chooseRow.trailingAnchor, constant: -2),
+            chooseButton.centerYAnchor.constraint(equalTo: chooseRow.centerYAnchor),
+            chooseButton.widthAnchor.constraint(equalToConstant: 104),
+
+            chooseRow.heightAnchor.constraint(equalToConstant: 30)
+        ])
+
+        chooseButton.target = self
+        chooseButton.action = #selector(chooseFile)
+
+        card.stack.addArrangedSubview(dropView)
+        card.stack.addArrangedSubview(chooseRow)
+        dropView.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        chooseRow.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        card.stack.spacing = 6
+        return card
+    }
+
+    private func makeSettingsCard() -> NSView {
+        let card = BTCardView(insets: NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16))
+
+        let header = BTUI.sectionHeader(title: "接口设置", symbol: "network")
+        card.stack.addArrangedSubview(header)
+
+        let apiLabel = BTUI.formLabel("API 地址")
+        let modelLabel = BTUI.formLabel("模型")
+        let keyLabel = BTUI.formLabel("API Key")
+        let chunkLabel = BTUI.formLabel("分块字符数")
+        let outputLabelTitle = BTUI.formLabel("输出格式")
+        for label in [apiLabel, modelLabel, keyLabel, chunkLabel, outputLabelTitle] {
+            label.widthAnchor.constraint(equalToConstant: 86).isActive = true
+        }
+
+        for field in [apiURLField, modelField, chunkSizeField] {
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.font = NSFont.systemFont(ofSize: 12)
+            field.isBezeled = true
+            field.bezelStyle = .roundedBezel
+            field.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        }
+        apiKeyField.translatesAutoresizingMaskIntoConstraints = false
+        apiKeyField.font = NSFont.systemFont(ofSize: 12)
+        apiKeyField.isBezeled = true
+        apiKeyField.bezelStyle = .roundedBezel
+        apiKeyField.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        apiKeyField.placeholderString = "sk-..."
+        apiURLField.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        apiKeyField.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        modelField.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        chunkSizeField.widthAnchor.constraint(equalToConstant: 90).isActive = true
+
+        formatPopup.translatesAutoresizingMaskIntoConstraints = false
+        formatPopup.controlSize = .regular
+        formatPopup.addItems(withTitles: formatOptions.map(\.title))
+        formatPopup.widthAnchor.constraint(equalToConstant: 230).isActive = true
+        formatPopup.heightAnchor.constraint(equalToConstant: 26).isActive = true
+
+        let rowOne = NSStackView(views: [apiLabel, apiURLField])
+        rowOne.orientation = .horizontal
+        rowOne.alignment = .centerY
+        rowOne.spacing = 10
+
+        let rowTwo = NSStackView(views: [modelLabel, modelField, keyLabel, apiKeyField])
+        rowTwo.orientation = .horizontal
+        rowTwo.alignment = .centerY
+        rowTwo.spacing = 10
+
+        let rowThree = NSStackView(views: [chunkLabel, chunkSizeField, outputLabelTitle, formatPopup, BTUI.spacer()])
+        rowThree.orientation = .horizontal
+        rowThree.alignment = .centerY
+        rowThree.spacing = 10
+
+        card.stack.addArrangedSubview(rowOne)
+        card.stack.addArrangedSubview(rowTwo)
+        card.stack.addArrangedSubview(rowThree)
+        rowOne.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        rowTwo.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        rowThree.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        card.stack.spacing = 8
+        return card
+    }
+
+    private func makeStatusStack() -> NSView {
+        let container = NSView()
+
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        progressLabel.translatesAutoresizingMaskIntoConstraints = false
+        progressBar.translatesAutoresizingMaskIntoConstraints = false
+        outputLabel.translatesAutoresizingMaskIntoConstraints = false
+        outputLabel.lineBreakMode = .byTruncatingMiddle
+
+        container.addSubview(statusLabel)
+        container.addSubview(progressLabel)
+        container.addSubview(progressBar)
+        container.addSubview(outputLabel)
+
+        NSLayoutConstraint.activate([
+            statusLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 2),
+            statusLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: progressLabel.leadingAnchor, constant: -10),
+
+            progressLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -2),
+            progressLabel.centerYAnchor.constraint(equalTo: statusLabel.centerYAnchor),
+
+            progressBar.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 6),
+            progressBar.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 2),
+            progressBar.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -2),
+
+            outputLabel.topAnchor.constraint(equalTo: progressBar.bottomAnchor, constant: 5),
+            outputLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 2),
+            outputLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -2),
+            outputLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+        return container
+    }
+
+    private func makeLogCard() -> BTCardView {
+        let card = BTCardView(insets: NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12))
+        card.stack.spacing = 6
+
+        let headerRow = NSView()
+        let header = BTUI.sectionHeader(title: "运行日志", symbol: "terminal")
+        header.translatesAutoresizingMaskIntoConstraints = false
+        headerRow.addSubview(header)
+        NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor),
+            header.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+            headerRow.heightAnchor.constraint(equalToConstant: 16)
+        ])
+        card.stack.addArrangedSubview(headerRow)
+        headerRow.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+
+        logView.isEditable = false
+        logView.isSelectable = true
+        logView.drawsBackground = false
+        logView.font = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
+        logView.textColor = .secondaryLabelColor
+        logView.textContainerInset = NSSize(width: 6, height: 6)
+        logView.string = "日志会显示在这里。\n"
+
+        let well = BTWellView()
+        well.translatesAutoresizingMaskIntoConstraints = false
+        well.cornerRadius = 8
+
+        let logScroll = NSScrollView()
+        logScroll.translatesAutoresizingMaskIntoConstraints = false
+        logScroll.hasVerticalScroller = true
+        logScroll.autohidesScrollers = true
+        logScroll.borderType = .noBorder
+        logScroll.drawsBackground = false
+        logScroll.documentView = logView
+        well.addSubview(logScroll)
+        NSLayoutConstraint.activate([
+            logScroll.leadingAnchor.constraint(equalTo: well.leadingAnchor, constant: 2),
+            logScroll.trailingAnchor.constraint(equalTo: well.trailingAnchor, constant: -2),
+            logScroll.topAnchor.constraint(equalTo: well.topAnchor, constant: 2),
+            logScroll.bottomAnchor.constraint(equalTo: well.bottomAnchor, constant: -2)
+        ])
+        well.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        well.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        card.stack.addArrangedSubview(well)
+        well.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        return card
+    }
+
+    private func makeBottomBar() -> NSView {
+        let bar = NSView()
+
+        for button in [startButton, resumeButton, skipButton, cancelButton, openOutputButton] {
+            button.translatesAutoresizingMaskIntoConstraints = false
+            bar.addSubview(button)
+        }
+
+        startButton.target = self
+        startButton.action = #selector(startProcessing)
+        startButton.isEnabled = false
+        resumeButton.target = self
+        resumeButton.action = #selector(resumeProcessing)
+        resumeButton.isEnabled = false
+        skipButton.target = self
+        skipButton.action = #selector(skipCurrentChunkAndContinue)
+        skipButton.isEnabled = false
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelProcessing)
+        cancelButton.isEnabled = false
+        openOutputButton.target = self
+        openOutputButton.action = #selector(openOutputDirectory)
+        openOutputButton.isEnabled = false
+
+        NSLayoutConstraint.activate([
+            bar.heightAnchor.constraint(equalToConstant: 30),
+
+            startButton.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 2),
+            startButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            startButton.widthAnchor.constraint(equalToConstant: 128),
+
+            resumeButton.leadingAnchor.constraint(equalTo: startButton.trailingAnchor, constant: 8),
+            resumeButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            resumeButton.widthAnchor.constraint(equalToConstant: 120),
+
+            skipButton.leadingAnchor.constraint(equalTo: resumeButton.trailingAnchor, constant: 8),
+            skipButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            skipButton.widthAnchor.constraint(equalToConstant: 118),
+
+            openOutputButton.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -2),
+            openOutputButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            openOutputButton.widthAnchor.constraint(equalToConstant: 128),
+
+            cancelButton.trailingAnchor.constraint(equalTo: openOutputButton.leadingAnchor, constant: -8),
+            cancelButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            cancelButton.widthAnchor.constraint(equalToConstant: 118)
+        ])
+        return bar
+    }
+
+    private func addFullWidth(_ view: NSView, to stack: NSStackView, spacingAfter: CGFloat? = nil) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(view)
+        view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        if let spacingAfter {
+            stack.setCustomSpacing(spacingAfter, after: view)
+        }
+    }
+
+    private func setProgress(_ value: Double) {
+        let clamped = min(100, max(0, value))
+        progressBar.progress = clamped / 100
+        progressLabel.stringValue = clamped > 0.5 ? "\(Int(clamped))%" : ""
     }
 
     private func setInput(_ url: URL) {
@@ -665,7 +750,9 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
         inputURL = url.standardizedFileURL
         outputURL = nil
         selectOutputFormatForInput(url)
-        fileLabel.stringValue = "已选择：\(url.lastPathComponent)"
+        fileLabel.stringValue = "已选择：\(url.path)"
+        fileLabel.textColor = .secondaryLabelColor
+        dropView.iconName = "doc.text"
         dropView.titleText = url.lastPathComponent
         dropView.subtitleText = "双击此区域可重新选择 TXT / MD"
         dropView.needsDisplay = true
@@ -673,8 +760,7 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
         statusLabel.stringValue = "文件已就绪，已按输入自动选择：\(formatTitle)"
         statusLabel.textColor = .labelColor
         outputLabel.stringValue = "完成后会显示保存位置"
-        progressIndicator.doubleValue = 0
-        progressLabel.stringValue = ""
+        setProgress(0)
         openOutputButton.isEnabled = false
         startButton.isEnabled = true
         loadResumeState(for: url)
@@ -684,12 +770,14 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
     private func updateControls(isRunning: Bool) {
         startButton.isEnabled = !isRunning && inputURL != nil
         cancelButton.isEnabled = isRunning || availableResumeState != nil
-        cancelButton.title = availableResumeState != nil && !isRunning ? "清理未完成" : "终止并清理"
+        cancelButton.setTitleText(availableResumeState != nil && !isRunning ? "清理未完成" : "终止并清理")
         apiURLField.isEnabled = !isRunning
         modelField.isEnabled = !isRunning
         apiKeyField.isEnabled = !isRunning
         chunkSizeField.isEnabled = !isRunning
         formatPopup.isEnabled = !isRunning
+        chooseButton.isEnabled = !isRunning
+        dropView.isInteractionEnabled = !isRunning
         openOutputButton.isEnabled = !isRunning && outputURL != nil && fileManager.fileExists(atPath: outputURL!.path)
         resumeButton.isEnabled = !isRunning && availableResumeState != nil
         skipButton.isEnabled = !isRunning && availableResumeState != nil
@@ -803,7 +891,7 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
                     self.nextChunkIndex += 1
                     self.persistPartialResult()
                     self.appendLog("第 \(index + 1) 块完成，\(content.count) 字符")
-                    self.progressIndicator.doubleValue = Double(self.nextChunkIndex) / Double(max(self.chunks.count, 1)) * 100
+                    self.setProgress(Double(self.nextChunkIndex) / Double(max(self.chunks.count, 1)) * 100)
                     self.progressLabel.stringValue = "\(self.nextChunkIndex) / \(self.chunks.count) 块"
                     self.processNextChunk(endpoint: endpoint, model: model, apiKey: apiKey)
                 } catch {
@@ -826,7 +914,7 @@ final class AIReflowWindowController: NSWindowController, NSWindowDelegate, Root
             cleanupPartFile()
             cleanupCheckpoint()
             availableResumeState = nil
-            progressIndicator.doubleValue = 100
+            setProgress(100)
             progressLabel.stringValue = "\(chunks.count) / \(chunks.count) 块"
             statusLabel.stringValue = "AI 排版完成"
             statusLabel.textColor = .systemGreen

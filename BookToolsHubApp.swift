@@ -27,81 +27,7 @@ private let parserOptions = [
     "本地 OCRmyPDF / Tesseract（备用）"
 ]
 
-private protocol DropZoneDelegate: AnyObject {
-    func dropZone(_ view: DropZone, received url: URL)
-    func dropZoneWasDoubleClicked(_ view: DropZone)
-}
-
-private final class DropZone: NSView {
-    weak var delegate: DropZoneDelegate?
-    var titleText = "把 PDF / TXT / MD 文件拖到这里"
-    var subtitleText = "也可以双击此区域选择文件"
-    var isHighlighted = false { didSet { needsDisplay = true } }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        registerForDraggedTypes([.fileURL])
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        registerForDraggedTypes([.fileURL])
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let box = bounds.insetBy(dx: 2, dy: 2)
-        let path = NSBezierPath(roundedRect: box, xRadius: 16, yRadius: 16)
-        (isHighlighted ? NSColor.controlAccentColor.withAlphaComponent(0.18) : NSColor.controlBackgroundColor).setFill()
-        path.fill()
-        (isHighlighted ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
-        path.lineWidth = isHighlighted ? 2.5 : 1.2
-        path.stroke()
-
-        let titleAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 20, weight: .semibold),
-            .foregroundColor: NSColor.labelColor
-        ]
-        let subtitleAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13),
-            .foregroundColor: NSColor.secondaryLabelColor
-        ]
-        let titleSize = titleText.size(withAttributes: titleAttributes)
-        let subtitleSize = subtitleText.size(withAttributes: subtitleAttributes)
-        titleText.draw(at: NSPoint(x: box.midX - titleSize.width / 2, y: box.midY + 8), withAttributes: titleAttributes)
-        subtitleText.draw(at: NSPoint(x: box.midX - subtitleSize.width / 2, y: box.midY - 22), withAttributes: subtitleAttributes)
-    }
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard firstSupportedURL(from: sender.draggingPasteboard) != nil else { return [] }
-        isHighlighted = true
-        return .copy
-    }
-
-    override func draggingExited(_ sender: NSDraggingInfo?) {
-        isHighlighted = false
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        isHighlighted = false
-        guard let url = firstSupportedURL(from: sender.draggingPasteboard) else { return false }
-        delegate?.dropZone(self, received: url)
-        return true
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount >= 2 {
-            delegate?.dropZoneWasDoubleClicked(self)
-        }
-        super.mouseDown(with: event)
-    }
-
-    private func firstSupportedURL(from pasteboard: NSPasteboard) -> URL? {
-        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] else { return nil }
-        return urls.first(where: { ["pdf", "txt", "md", "markdown"].contains($0.pathExtension.lowercased()) })
-    }
-}
-
-private final class MainWindowController: NSWindowController, NSWindowDelegate, DropZoneDelegate {
+private final class MainWindowController: NSWindowController, NSWindowDelegate, FileDropZoneDelegate {
     private let fileManager = FileManager.default
     private var selectedURL: URL?
     private var lastTextURL: URL?
@@ -119,38 +45,51 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private var languageOptions: [LanguageOption] = []
     private var aiReflowWindowController: AIReflowWindowController?
 
+    private let headerIconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: appTitle)
-    private let subtitleLabel = NSTextField(labelWithString: "三步完成：PDF 解析（默认 MinerU）→ 转换为 MD / TXT / EPUB → MD / TXT 交给 AI 排版")
-    private let dropZone = DropZone(frame: .zero)
-    private let fileLabel = NSTextField(labelWithString: "尚未选择文件")
-    private let statusLabel = NSTextField(labelWithString: "请选择 PDF、TXT 或 MD")
-    private let outputLabel = NSTextField(labelWithString: "完成后会显示产物位置")
-    private let progressIndicator = NSProgressIndicator(frame: .zero)
+    private let subtitleLabel = BTUI.label(
+        "把扫描版 PDF 变成干净、可编辑的电子书",
+        size: 12,
+        color: .secondaryLabelColor
+    )
+    private let dropZone = FileDropZoneView(
+        acceptedExtensions: ["pdf", "txt", "md", "markdown"],
+        title: "把 PDF / TXT / MD 文件拖到这里",
+        subtitle: "也可以双击此区域选择文件"
+    )
+    private let fileLabel = BTUI.label("尚未选择文件", size: 11, color: .tertiaryLabelColor)
+    private let statusLabel = BTUI.label("请选择 PDF、TXT 或 MD，开始三步处理", size: 13, weight: .medium)
+    private let progressLabel = BTUI.label("", size: 11, color: .secondaryLabelColor, alignment: .right)
+    private let outputLabel = BTUI.label("完成后会显示产物位置", size: 11, color: .secondaryLabelColor)
+    private let progressBar = BTProgressBar()
     private let languagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let parserPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let formatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let mineruTokenField = NSSecureTextField(string: "")
-    private let ocrButton = NSButton(frame: .zero)
-    private let parseButton = NSButton(frame: .zero)
-    private let aiButton = NSButton(frame: .zero)
-    private let cancelButton = NSButton(frame: .zero)
-    private let openOutputButton = NSButton(frame: .zero)
-    private let chooseButton = NSButton(frame: .zero)
+    private let chooseButton = BTButton(title: "选择文件", symbol: "folder", style: .ghost, height: 28)
+    private let ocrButton = BTButton(title: "本地 OCR 备用", symbol: "text.viewfinder", style: .secondary, height: 30)
+    private let parseButton = BTButton(title: "开始转换", symbol: "wand.and.stars", style: .primary, height: 30)
+    private let aiButton = BTButton(title: "打开 AI 排版", symbol: "text.alignleft", style: .accent, height: 30)
+    private let cancelButton = BTButton(title: "终止并清理", symbol: "stop.circle", style: .destructive, height: 28)
+    private let openOutputButton = BTButton(title: "打开产物目录", symbol: "folder", style: .secondary, height: 28)
     private let logView = NSTextView(frame: .zero)
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 780, height: 720),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = appTitle
-        window.minSize = NSSize(width: 740, height: 680)
+        window.title = ""
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.minSize = NSSize(width: 820, height: 780)
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
         buildInterface()
+        window.center()
         discoverLanguages()
         loadSavedMinerUToken()
         updateControls(isRunning: false)
@@ -168,11 +107,11 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         shutdownForTermination()
     }
 
-    func dropZoneWasDoubleClicked(_ view: DropZone) {
+    func dropZoneWasDoubleClicked(_ view: FileDropZoneView) {
         chooseFile()
     }
 
-    func dropZone(_ view: DropZone, received url: URL) {
+    func dropZone(_ view: FileDropZoneView, received url: URL) {
         setSelectedFile(url)
     }
 
@@ -287,157 +226,393 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         NSWorkspace.shared.activateFileViewerSelecting([target])
     }
 
+    @objc private func parserSelectionChanged() {
+        refreshModeUI()
+        updateControls(isRunning: process?.isRunning == true)
+    }
+
+    // MARK: - Interface
+
     private func buildInterface() {
         guard let content = window?.contentView else { return }
+
         let root = NSView(frame: content.bounds)
         root.autoresizingMask = [.width, .height]
         window?.contentView = root
 
-        titleLabel.font = NSFont.systemFont(ofSize: 27, weight: .bold)
-        titleLabel.frame = NSRect(x: 30, y: 666, width: 720, height: 32)
-        titleLabel.autoresizingMask = [.minYMargin, .width]
-        root.addSubview(titleLabel)
+        let mainStack = NSStackView()
+        mainStack.orientation = .vertical
+        mainStack.alignment = .leading
+        mainStack.spacing = 10
+        mainStack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(mainStack)
 
-        subtitleLabel.font = NSFont.systemFont(ofSize: 13)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.frame = NSRect(x: 32, y: 642, width: 720, height: 20)
-        subtitleLabel.autoresizingMask = [.minYMargin, .width]
-        root.addSubview(subtitleLabel)
+        NSLayoutConstraint.activate([
+            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
+            mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -18)
+        ])
 
-        dropZone.frame = NSRect(x: 30, y: 510, width: 720, height: 112)
-        dropZone.autoresizingMask = [.width, .minYMargin]
+        addFullWidth(makeHeader(), to: mainStack, spacingAfter: 4)
+        addFullWidth(makeDropCard(), to: mainStack)
+        addFullWidth(makeSettingsCard(), to: mainStack)
+        addFullWidth(makeStepsCard(), to: mainStack)
+        addFullWidth(makeStatusStack(), to: mainStack, spacingAfter: 2)
+
+        let logCard = makeLogCard()
+        logCard.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        addFullWidth(logCard, to: mainStack)
+
+        addFullWidth(makeBottomBar(), to: mainStack, spacingAfter: 0)
+    }
+
+    private func makeHeader() -> NSView {
+        let header = NSView()
+
+        headerIconView.translatesAutoresizingMaskIntoConstraints = false
+        headerIconView.imageScaling = .scaleProportionallyDown
+        headerIconView.image = NSImage(named: "AppIcon") ?? NSApp.applicationIconImage
+        header.addSubview(headerIconView)
+
+        titleLabel.font = NSFont.systemFont(ofSize: 22, weight: .bold)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(titleLabel)
+
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(subtitleLabel)
+
+        NSLayoutConstraint.activate([
+            headerIconView.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            headerIconView.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            headerIconView.widthAnchor.constraint(equalToConstant: 38),
+            headerIconView.heightAnchor.constraint(equalToConstant: 38),
+
+            titleLabel.leadingAnchor.constraint(equalTo: headerIconView.trailingAnchor, constant: 12),
+            titleLabel.topAnchor.constraint(equalTo: header.topAnchor),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor),
+
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            subtitleLabel.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor),
+
+            header.heightAnchor.constraint(equalToConstant: 46)
+        ])
+        return header
+    }
+
+    private func makeDropCard() -> NSView {
+        let card = BTCardView(insets: NSEdgeInsets(top: 12, left: 12, bottom: 10, right: 12))
+
         dropZone.delegate = self
-        root.addSubview(dropZone)
+        dropZone.translatesAutoresizingMaskIntoConstraints = false
+        dropZone.heightAnchor.constraint(equalToConstant: 78).isActive = true
 
-        chooseButton.title = "选择文件"
+        let chooseRow = NSView()
+        fileLabel.translatesAutoresizingMaskIntoConstraints = false
+        chooseButton.translatesAutoresizingMaskIntoConstraints = false
+        chooseRow.addSubview(fileLabel)
+        chooseRow.addSubview(chooseButton)
+
+        NSLayoutConstraint.activate([
+            fileLabel.leadingAnchor.constraint(equalTo: chooseRow.leadingAnchor, constant: 4),
+            fileLabel.centerYAnchor.constraint(equalTo: chooseRow.centerYAnchor),
+            fileLabel.trailingAnchor.constraint(lessThanOrEqualTo: chooseButton.leadingAnchor, constant: -10),
+
+            chooseButton.trailingAnchor.constraint(equalTo: chooseRow.trailingAnchor, constant: -2),
+            chooseButton.centerYAnchor.constraint(equalTo: chooseRow.centerYAnchor),
+            chooseButton.widthAnchor.constraint(equalToConstant: 104),
+
+            chooseRow.heightAnchor.constraint(equalToConstant: 30)
+        ])
         chooseButton.target = self
         chooseButton.action = #selector(chooseFile)
-        chooseButton.frame = NSRect(x: 30, y: 470, width: 100, height: 30)
-        chooseButton.autoresizingMask = [.minYMargin]
-        root.addSubview(chooseButton)
 
-        fileLabel.font = NSFont.systemFont(ofSize: 13)
-        fileLabel.lineBreakMode = .byTruncatingMiddle
-        fileLabel.frame = NSRect(x: 145, y: 475, width: 605, height: 20)
-        fileLabel.autoresizingMask = [.minYMargin, .width]
-        root.addSubview(fileLabel)
+        card.stack.addArrangedSubview(dropZone)
+        card.stack.addArrangedSubview(chooseRow)
+        dropZone.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        chooseRow.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        card.stack.spacing = 6
+        return card
+    }
 
-        addLabel("识别语言：", frame: NSRect(x: 32, y: 431, width: 78, height: 22), to: root)
-        languagePopup.frame = NSRect(x: 112, y: 429, width: 220, height: 26)
-        languagePopup.autoresizingMask = [.minYMargin]
-        root.addSubview(languagePopup)
+    private func makeSettingsCard() -> NSView {
+        let card = BTCardView(insets: NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16))
 
-        addLabel("PDF 解析：", frame: NSRect(x: 360, y: 431, width: 70, height: 22), to: root)
-        parserPopup.frame = NSRect(x: 432, y: 429, width: 318, height: 26)
+        let header = BTUI.sectionHeader(title: "解析设置", symbol: "slider.horizontal.3")
+        card.stack.addArrangedSubview(header)
+
+        let languageLabel = BTUI.formLabel("识别语言")
+        let parserLabel = BTUI.formLabel("PDF 解析")
+        let formatLabel = BTUI.formLabel("输出格式")
+        let tokenLabel = BTUI.formLabel("MinerU Token")
+
+        languagePopup.translatesAutoresizingMaskIntoConstraints = false
+        parserPopup.translatesAutoresizingMaskIntoConstraints = false
+        formatPopup.translatesAutoresizingMaskIntoConstraints = false
+        mineruTokenField.translatesAutoresizingMaskIntoConstraints = false
+
+        for control in [languagePopup, parserPopup, formatPopup] {
+            control.controlSize = .regular
+        }
+        mineruTokenField.font = NSFont.systemFont(ofSize: 12)
+
+        languagePopup.widthAnchor.constraint(equalToConstant: 230).isActive = true
+        formatPopup.widthAnchor.constraint(equalToConstant: 230).isActive = true
+        languagePopup.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        formatPopup.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        parserPopup.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        mineruTokenField.heightAnchor.constraint(equalToConstant: 26).isActive = true
+
         parserPopup.addItems(withTitles: parserOptions)
         parserPopup.selectItem(at: 0)
         parserPopup.target = self
         parserPopup.action = #selector(parserSelectionChanged)
-        parserPopup.autoresizingMask = [.minYMargin, .width]
-        root.addSubview(parserPopup)
 
-        addLabel("输出格式：", frame: NSRect(x: 32, y: 396, width: 78, height: 22), to: root)
-        formatPopup.frame = NSRect(x: 112, y: 394, width: 220, height: 26)
         formatPopup.addItems(withTitles: formatOptions.map(\.title))
         formatPopup.selectItem(at: 0)
-        formatPopup.autoresizingMask = [.minYMargin]
-        root.addSubview(formatPopup)
 
-        addLabel("MinerU Token：", frame: NSRect(x: 360, y: 396, width: 96, height: 22), to: root)
-        mineruTokenField.frame = NSRect(x: 456, y: 394, width: 294, height: 24)
-        mineruTokenField.placeholderString = "只需填写一次，会记住"
-        mineruTokenField.autoresizingMask = [.minYMargin, .width]
-        root.addSubview(mineruTokenField)
+        mineruTokenField.placeholderString = "填写一次即可，自动记住"
+        mineruTokenField.isBezeled = true
+        mineruTokenField.bezelStyle = .roundedBezel
 
-        addStepLabel("1. PDF 解析（默认 MinerU）", frame: NSRect(x: 32, y: 345, width: 250, height: 22), to: root)
-        ocrButton.title = "本地 OCR 备用"
-        ocrButton.target = self
-        ocrButton.action = #selector(runOCRPDF)
-        ocrButton.frame = NSRect(x: 250, y: 341, width: 130, height: 30)
-        ocrButton.autoresizingMask = [.minYMargin]
-        root.addSubview(ocrButton)
+        for label in [languageLabel, parserLabel, formatLabel, tokenLabel] {
+            label.widthAnchor.constraint(equalToConstant: 86).isActive = true
+        }
 
-        addStepLabel("2. 转换为 MD / TXT / EPUB", frame: NSRect(x: 32, y: 306, width: 230, height: 22), to: root)
-        parseButton.title = "开始转换"
-        parseButton.target = self
-        parseButton.action = #selector(runPDFParse)
-        parseButton.frame = NSRect(x: 250, y: 302, width: 130, height: 30)
-        parseButton.autoresizingMask = [.minYMargin]
-        root.addSubview(parseButton)
+        let rowOne = NSStackView(views: [languageLabel, languagePopup, parserLabel, parserPopup])
+        rowOne.orientation = .horizontal
+        rowOne.alignment = .centerY
+        rowOne.spacing = 10
 
-        addStepLabel("3. MD / TXT 交给 AI 排版", frame: NSRect(x: 32, y: 267, width: 230, height: 22), to: root)
-        aiButton.title = "打开 AI 排版"
-        aiButton.target = self
-        aiButton.action = #selector(sendToAIReflow)
-        aiButton.frame = NSRect(x: 250, y: 263, width: 150, height: 30)
-        aiButton.autoresizingMask = [.minYMargin]
-        root.addSubview(aiButton)
+        let rowTwo = NSStackView(views: [formatLabel, formatPopup, tokenLabel, mineruTokenField])
+        rowTwo.orientation = .horizontal
+        rowTwo.alignment = .centerY
+        rowTwo.spacing = 10
+        rowTwo.distribution = .fill
 
-        progressIndicator.frame = NSRect(x: 30, y: 225, width: 720, height: 18)
-        progressIndicator.autoresizingMask = [.width, .minYMargin]
-        progressIndicator.style = .bar
-        progressIndicator.isIndeterminate = false
-        root.addSubview(progressIndicator)
+        parserPopup.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        mineruTokenField.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
-        statusLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        statusLabel.frame = NSRect(x: 32, y: 198, width: 718, height: 20)
-        statusLabel.autoresizingMask = [.width, .minYMargin]
-        root.addSubview(statusLabel)
+        card.stack.addArrangedSubview(rowOne)
+        card.stack.addArrangedSubview(rowTwo)
+        rowOne.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        rowTwo.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        card.stack.spacing = 8
+        return card
+    }
 
-        outputLabel.font = NSFont.systemFont(ofSize: 12)
-        outputLabel.textColor = .secondaryLabelColor
+    private func makeStepsCard() -> NSView {
+        let card = BTCardView(insets: NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16))
+
+        let header = BTUI.sectionHeader(title: "三步流程", symbol: "list.number")
+        card.stack.addArrangedSubview(header)
+
+        let stepOne = makeStepRow(
+            number: 1,
+            title: "PDF 解析",
+            subtitle: "默认 MinerU 云端解析",
+            button: ocrButton
+        )
+        let stepTwo = makeStepRow(
+            number: 2,
+            title: "转换为 MD / TXT / EPUB",
+            subtitle: "按所选格式生成电子书文本",
+            button: parseButton
+        )
+        let stepThree = makeStepRow(
+            number: 3,
+            title: "交给 AI 排版",
+            subtitle: "进一步整理章节与段落",
+            button: aiButton
+        )
+
+        for view in [stepOne, BTUI.separator(), stepTwo, BTUI.separator(), stepThree] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            card.stack.addArrangedSubview(view)
+            view.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        }
+        card.stack.spacing = 4
+        return card
+    }
+
+    private func makeStepRow(number: Int, title: String, subtitle: String, button: BTButton) -> NSView {
+        let row = NSView()
+
+        let badge = BTNumberBadge(number: number)
+        row.addSubview(badge)
+
+        let titleLabel = BTUI.label(title, size: 13, weight: .semibold)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(titleLabel)
+
+        let detailLabel = BTUI.label(subtitle, size: 11, color: .secondaryLabelColor)
+        detailLabel.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(detailLabel)
+
+        button.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(button)
+
+        NSLayoutConstraint.activate([
+            row.heightAnchor.constraint(equalToConstant: 36),
+
+            badge.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            badge.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+
+            titleLabel.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 10),
+            titleLabel.topAnchor.constraint(equalTo: row.topAnchor),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -10),
+
+            detailLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            detailLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 1),
+            detailLabel.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -10),
+
+            button.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -2),
+            button.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+            button.widthAnchor.constraint(equalToConstant: 132)
+        ])
+        return row
+    }
+
+    private func makeStatusStack() -> NSView {
+        let container = NSView()
+
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        progressLabel.translatesAutoresizingMaskIntoConstraints = false
+        progressBar.translatesAutoresizingMaskIntoConstraints = false
+        outputLabel.translatesAutoresizingMaskIntoConstraints = false
         outputLabel.lineBreakMode = .byTruncatingMiddle
-        outputLabel.frame = NSRect(x: 32, y: 176, width: 718, height: 18)
-        outputLabel.autoresizingMask = [.width, .minYMargin]
-        root.addSubview(outputLabel)
 
-        let logScroll = NSScrollView(frame: NSRect(x: 30, y: 64, width: 720, height: 100))
-        logScroll.autoresizingMask = [.width, .minYMargin]
+        container.addSubview(statusLabel)
+        container.addSubview(progressLabel)
+        container.addSubview(progressBar)
+        container.addSubview(outputLabel)
+
+        NSLayoutConstraint.activate([
+            statusLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 2),
+            statusLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 2),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: progressLabel.leadingAnchor, constant: -10),
+
+            progressLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -2),
+            progressLabel.centerYAnchor.constraint(equalTo: statusLabel.centerYAnchor),
+
+            progressBar.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 6),
+            progressBar.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 2),
+            progressBar.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -2),
+
+            outputLabel.topAnchor.constraint(equalTo: progressBar.bottomAnchor, constant: 5),
+            outputLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 2),
+            outputLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -2),
+            outputLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+        return container
+    }
+
+    private func makeLogCard() -> BTCardView {
+        let card = BTCardView(insets: NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12))
+        card.stack.spacing = 6
+
+        let headerRow = NSView()
+        let header = BTUI.sectionHeader(title: "运行日志", symbol: "terminal")
+        header.translatesAutoresizingMaskIntoConstraints = false
+        headerRow.addSubview(header)
+        NSLayoutConstraint.activate([
+            header.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor),
+            header.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+            headerRow.heightAnchor.constraint(equalToConstant: 16)
+        ])
+        card.stack.addArrangedSubview(headerRow)
+        headerRow.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+
+        configureLogView()
+
+        let well = BTWellView()
+        well.translatesAutoresizingMaskIntoConstraints = false
+        well.cornerRadius = 8
+
+        let logScroll = NSScrollView()
+        logScroll.translatesAutoresizingMaskIntoConstraints = false
         logScroll.hasVerticalScroller = true
-        logScroll.borderType = .bezelBorder
+        logScroll.autohidesScrollers = true
+        logScroll.borderType = .noBorder
+        logScroll.drawsBackground = false
+        logScroll.documentView = logView
+        well.addSubview(logScroll)
+        NSLayoutConstraint.activate([
+            logScroll.leadingAnchor.constraint(equalTo: well.leadingAnchor, constant: 2),
+            logScroll.trailingAnchor.constraint(equalTo: well.trailingAnchor, constant: -2),
+            logScroll.topAnchor.constraint(equalTo: well.topAnchor, constant: 2),
+            logScroll.bottomAnchor.constraint(equalTo: well.bottomAnchor, constant: -2)
+        ])
+
+        well.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        well.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        card.stack.addArrangedSubview(well)
+        well.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        return card
+    }
+
+    private func configureLogView() {
         logView.isEditable = false
         logView.isSelectable = true
-        logView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        logView.textColor = .labelColor
-        logView.drawsBackground = true
-        logView.backgroundColor = .textBackgroundColor
-        logView.textContainerInset = NSSize(width: 8, height: 8)
+        logView.drawsBackground = false
+        logView.font = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
+        logView.textColor = .secondaryLabelColor
+        logView.textContainerInset = NSSize(width: 6, height: 6)
         logView.string = "日志会显示在这里。\n"
-        logScroll.documentView = logView
-        root.addSubview(logScroll)
+    }
 
-        cancelButton.title = "终止并清理"
+    private func makeBottomBar() -> NSView {
+        let bar = NSView()
+
+        cancelButton.translatesAutoresizingMaskIntoConstraints = false
+        openOutputButton.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(cancelButton)
+        bar.addSubview(openOutputButton)
+
         cancelButton.target = self
         cancelButton.action = #selector(cancelProcessing)
-        cancelButton.frame = NSRect(x: 30, y: 22, width: 125, height: 30)
-        cancelButton.autoresizingMask = [.minYMargin]
-        root.addSubview(cancelButton)
-
-        openOutputButton.title = "打开产物目录"
         openOutputButton.target = self
         openOutputButton.action = #selector(openOutputDirectory)
-        openOutputButton.frame = NSRect(x: 170, y: 22, width: 135, height: 30)
-        openOutputButton.autoresizingMask = [.minYMargin]
-        root.addSubview(openOutputButton)
+        ocrButton.target = self
+        ocrButton.action = #selector(runOCRPDF)
+        parseButton.target = self
+        parseButton.action = #selector(runPDFParse)
+        parseButton.keyEquivalent = "\r"
+        aiButton.target = self
+        aiButton.action = #selector(sendToAIReflow)
 
-        refreshModeUI()
+        NSLayoutConstraint.activate([
+            bar.heightAnchor.constraint(equalToConstant: 30),
+
+            cancelButton.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 2),
+            cancelButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            cancelButton.widthAnchor.constraint(equalToConstant: 118),
+
+            openOutputButton.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -2),
+            openOutputButton.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            openOutputButton.widthAnchor.constraint(equalToConstant: 128)
+        ])
+        return bar
     }
 
-    private func addLabel(_ text: String, frame: NSRect, to view: NSView) {
-        let label = NSTextField(labelWithString: text)
-        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        label.frame = frame
-        label.autoresizingMask = [.minYMargin]
-        view.addSubview(label)
+    private func addFullWidth(_ view: NSView, to stack: NSStackView, spacingAfter: CGFloat? = nil) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(view)
+        view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        if let spacingAfter {
+            stack.setCustomSpacing(spacingAfter, after: view)
+        }
     }
 
-    private func addStepLabel(_ text: String, frame: NSRect, to view: NSView) {
-        let label = NSTextField(labelWithString: text)
-        label.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        label.frame = frame
-        label.autoresizingMask = [.minYMargin]
-        view.addSubview(label)
+    private func setProgress(_ value: Double) {
+        let clamped = min(100, max(0, value))
+        progressBar.progress = clamped / 100
+        progressLabel.stringValue = clamped > 0.5 ? "\(Int(clamped))%" : ""
     }
+
+    // MARK: - Selection
 
     private func setSelectedFile(_ url: URL) {
         guard process == nil else { return }
@@ -451,15 +626,17 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
             lastTextURL = url.standardizedFileURL
         }
         outputURL = nil
+        dropZone.iconName = ext == "pdf" ? "doc.richtext" : "doc.text"
         dropZone.titleText = url.lastPathComponent
         dropZone.subtitleText = ext == "pdf" ? "默认直接用 MinerU 解析，OCR 是备用路线" : "可直接发送到 AI 排版"
         dropZone.needsDisplay = true
         fileLabel.stringValue = "已选择：\(url.path)"
+        fileLabel.textColor = .secondaryLabelColor
         statusLabel.stringValue = ext == "pdf" ? "PDF 已就绪，默认可直接 MinerU 解析" : "文本文件已就绪，可以发送到 AI 排版"
         statusLabel.textColor = .labelColor
         outputLabel.stringValue = "完成后会显示产物位置"
         logView.string = "日志会显示在这里。\n"
-        progressIndicator.doubleValue = 0
+        setProgress(0)
         updateControls(isRunning: false)
     }
 
@@ -468,6 +645,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         let isPDF = ext == "pdf"
         let parserIsLocal = selectedParserCode() == "local"
         chooseButton.isEnabled = !isRunning
+        dropZone.isInteractionEnabled = !isRunning
         languagePopup.isEnabled = !isRunning
         parserPopup.isEnabled = !isRunning
         formatPopup.isEnabled = !isRunning
@@ -479,6 +657,8 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         openOutputButton.isEnabled = !isRunning && (outputURL != nil || lastTextURL != nil || selectedURL != nil)
         refreshModeUI()
     }
+
+    // MARK: - Worker
 
     private func runWorker(scriptName: String, arguments: [String], extraEnvironment: [String: String] = [:], initialStatus: String) {
         guard let scriptURL = Bundle.main.resourceURL?.appendingPathComponent(scriptName) else {
@@ -493,7 +673,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         partialWorkerLine = ""
         lastWorkerError = nil
         isCancelling = false
-        progressIndicator.doubleValue = 0
+        setProgress(0)
         statusLabel.stringValue = initialStatus
         statusLabel.textColor = .labelColor
         outputLabel.stringValue = "完成后会显示产物位置"
@@ -559,7 +739,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
             } else if line.hasPrefix("TOTAL_PAGES=") {
                 totalPages = Int(line.dropFirst(12))
             } else if line.hasPrefix("PROGRESS="), let value = Double(line.dropFirst(9)) {
-                progressIndicator.doubleValue = value
+                setProgress(value)
             } else if line.hasPrefix("OUTPUT_PATH=") {
                 let url = URL(fileURLWithPath: String(line.dropFirst(12)))
                 outputURL = url
@@ -584,7 +764,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         guard let first = trimmed.split(separator: " ", maxSplits: 1).first,
               let page = Int(first), page > 0, page <= totalPages else { return }
         let value = min(88, max(1, Double(page) / Double(totalPages) * 88))
-        progressIndicator.doubleValue = max(progressIndicator.doubleValue, value)
+        setProgress(max(progressBar.progress * 100, value))
         if currentPhase == "OCR" {
             statusLabel.stringValue = "正在 OCR：第 \(page) / \(totalPages) 页"
         } else {
@@ -606,7 +786,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
 
         if isCancelling {
             cleanupKnownTemporaryFiles()
-            progressIndicator.doubleValue = 0
+            setProgress(0)
             statusLabel.stringValue = "已终止，临时产物已清理"
             statusLabel.textColor = .systemOrange
             outputLabel.stringValue = "本次处理未生成产物"
@@ -616,21 +796,23 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
 
         if worker.terminationStatus == 0, let outputURL, fileManager.fileExists(atPath: outputURL.path) {
             cleanupKnownTemporaryFiles()
-            progressIndicator.doubleValue = 100
+            setProgress(100)
             statusLabel.stringValue = "处理完成"
             statusLabel.textColor = .systemGreen
             outputLabel.stringValue = "产物位置：\(outputURL.path)"
             if ["txt", "md", "markdown"].contains(outputURL.pathExtension.lowercased()) {
                 lastTextURL = outputURL
                 selectedURL = outputURL
+                dropZone.iconName = "doc.text"
                 dropZone.titleText = outputURL.lastPathComponent
                 dropZone.subtitleText = "可直接发送到 AI 排版"
                 dropZone.needsDisplay = true
                 fileLabel.stringValue = "当前文本产物：\(outputURL.path)"
+                fileLabel.textColor = .secondaryLabelColor
             }
         } else {
             cleanupKnownTemporaryFiles()
-            progressIndicator.doubleValue = 0
+            setProgress(0)
             if let lastWorkerError {
                 statusLabel.stringValue = lastWorkerError
                 outputLabel.stringValue = "失败原因：\(lastWorkerError)"
@@ -697,14 +879,9 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         parserPopup.indexOfSelectedItem == 0 ? "mineru" : "local"
     }
 
-    @objc private func parserSelectionChanged() {
-        refreshModeUI()
-        updateControls(isRunning: process?.isRunning == true)
-    }
-
     private func refreshModeUI() {
         let parserIsMineru = selectedParserCode() == "mineru"
-        ocrButton.title = parserIsMineru ? "本地 OCR 备用" : "执行本地 OCR"
+        ocrButton.setTitleText(parserIsMineru ? "本地 OCR 备用" : "执行本地 OCR")
         if let ext = selectedURL?.pathExtension.lowercased(), ext == "pdf" {
             dropZone.subtitleText = parserIsMineru
                 ? "默认直接用 MinerU 解析，OCR 只是备用路线"
@@ -713,8 +890,8 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
             fileLabel.stringValue = selectedURL.map { "已选择：\($0.path)" } ?? fileLabel.stringValue
         }
         subtitleLabel.stringValue = parserIsMineru
-            ? "三步流程：PDF 解析（MinerU）→ 转换为 MD / TXT / EPUB → MD / TXT 交给 AI 排版"
-            : "三步流程：PDF 解析（本地 OCR，自动跳过已有文字层）→ 转换为 MD / TXT / EPUB → MD / TXT 交给 AI 排版"
+            ? "把扫描版 PDF 变成干净、可编辑的电子书 · MinerU 云端解析"
+            : "把扫描版 PDF 变成干净、可编辑的电子书 · 本地 OCR 模式"
     }
 
     private func currentTextURL() -> URL? {
@@ -780,6 +957,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController = MainWindowController()
         windowController.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+        windowController.window?.makeFirstResponder(nil)
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {

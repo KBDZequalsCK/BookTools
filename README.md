@@ -20,8 +20,10 @@ AI 排版窗口已经集成到合并版 App 中。
 
 - `BookToolsHubApp.swift`：合并版主窗口源码。
 - `AIReflowApp.swift`：内置 AI 排版窗口源码。
+- `BookToolsUI.swift`：两个窗口共用的界面组件（卡片、按钮、拖拽区、进度条等）。
 - `reflow_txt_epub_worker.command`：PDF 解析和转换 worker，包含 MinerU 和本地 OCR 路线。
 - `BookToolsHub_Info.plist`：合并版 App 的 plist。
+- `Assets/`：App 图标资源。`AppIcon-source.png` 是原始图，`AppIcon.icns` 是打包后的图标，`make_icon.py` 负责裁切圆角、加阴影并生成 iconset。
 - `Apps/PDF Book Tools.app`：唯一保留的合并版 App。
 
 ## 重要实现说明
@@ -65,9 +67,10 @@ AI 排版断点规则：
 ```zsh
 cd /Users/kbdz/Documents/BookTools
 cp BookToolsHubApp.swift /tmp/main.swift
-swiftc -target x86_64-apple-macosx13.0 -O /tmp/main.swift AIReflowApp.swift -o /tmp/PDFBookTools.new
+swiftc -target x86_64-apple-macosx13.0 -O /tmp/main.swift AIReflowApp.swift BookToolsUI.swift -o /tmp/PDFBookTools.new
 cp /tmp/PDFBookTools.new "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app/Contents/MacOS/PDFBookTools"
 cp reflow_txt_epub_worker.command "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app/Contents/Resources/reflow_txt_epub_worker.command"
+cp Assets/AppIcon.icns "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
 codesign --verify --deep --strict --verbose=2 "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
 open "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
@@ -78,6 +81,7 @@ open "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
 - Intel Mac 编译目标使用 `x86_64-apple-macosx13.0`。
 - 需要把 `BookToolsHubApp.swift` 临时复制成 `/tmp/main.swift`，因为 Swift 多文件编译时只有 `main.swift` 适合放顶层启动代码。
 - 编译后必须重新签名，否则 App 可能打不开或行为异常。
+- 图标由 `Assets/make_icon.py` 生成：先处理 `AppIcon-source.png`，再执行 `iconutil -c icns` 得到 `AppIcon.icns`；App 的 `CFBundleIconFile` 指向 `AppIcon`。
 
 ## 维护注意事项
 
