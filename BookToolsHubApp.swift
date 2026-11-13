@@ -454,17 +454,25 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         dropZone.heightAnchor.constraint(equalToConstant: 78).isActive = true
 
         let chooseRow = NSView()
+        fileLabel.lineBreakMode = .byTruncatingMiddle
+        fileLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         fileLabel.translatesAutoresizingMaskIntoConstraints = false
         chooseButton.translatesAutoresizingMaskIntoConstraints = false
+        oneClickButton.translatesAutoresizingMaskIntoConstraints = false
         chooseRow.addSubview(fileLabel)
         chooseRow.addSubview(chooseButton)
+        chooseRow.addSubview(oneClickButton)
 
         NSLayoutConstraint.activate([
             fileLabel.leadingAnchor.constraint(equalTo: chooseRow.leadingAnchor, constant: 4),
             fileLabel.centerYAnchor.constraint(equalTo: chooseRow.centerYAnchor),
             fileLabel.trailingAnchor.constraint(lessThanOrEqualTo: chooseButton.leadingAnchor, constant: -10),
 
-            chooseButton.trailingAnchor.constraint(equalTo: chooseRow.trailingAnchor, constant: -2),
+            oneClickButton.trailingAnchor.constraint(equalTo: chooseRow.trailingAnchor, constant: -2),
+            oneClickButton.centerYAnchor.constraint(equalTo: chooseRow.centerYAnchor),
+            oneClickButton.widthAnchor.constraint(equalToConstant: 158),
+
+            chooseButton.trailingAnchor.constraint(equalTo: oneClickButton.leadingAnchor, constant: -8),
             chooseButton.centerYAnchor.constraint(equalTo: chooseRow.centerYAnchor),
             chooseButton.widthAnchor.constraint(equalToConstant: 104),
 
@@ -472,6 +480,8 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         ])
         chooseButton.target = self
         chooseButton.action = #selector(chooseFile)
+        oneClickButton.target = self
+        oneClickButton.action = #selector(runOneClick)
 
         card.stack.addArrangedSubview(dropZone)
         card.stack.addArrangedSubview(chooseRow)
@@ -595,26 +605,8 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private func makeStepsCard() -> NSView {
         let card = BTCardView(insets: NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16))
 
-        let headerRow = NSView()
         let header = BTUI.sectionHeader(title: "三步流程", symbol: "list.number")
-        header.translatesAutoresizingMaskIntoConstraints = false
-        headerRow.addSubview(header)
-
-        oneClickButton.target = self
-        oneClickButton.action = #selector(runOneClick)
-        oneClickButton.translatesAutoresizingMaskIntoConstraints = false
-        headerRow.addSubview(oneClickButton)
-
-        NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor),
-            header.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
-            oneClickButton.trailingAnchor.constraint(equalTo: headerRow.trailingAnchor, constant: -2),
-            oneClickButton.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
-            oneClickButton.widthAnchor.constraint(equalToConstant: 158),
-            headerRow.heightAnchor.constraint(equalToConstant: 30)
-        ])
-        card.stack.addArrangedSubview(headerRow)
-        headerRow.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        card.stack.addArrangedSubview(header)
 
         let stepOne = makeStepRow(
             number: 1,
