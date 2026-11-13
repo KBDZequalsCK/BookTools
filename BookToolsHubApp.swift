@@ -50,7 +50,8 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     private let aiSettingsExpandedKey = "aiSettingsExpanded"
     private weak var mainScrollView: NSScrollView?
     private let parseSettingsRows = NSStackView()
-    private let parseSettingsToggle = BTButton(title: "展开设置", symbol: "chevron.right", style: .ghost, height: 22)
+    private let parseSettingsToggle = BTButton(title: "解析设置", symbol: "chevron.right", style: .ghost, height: 22)
+    private let parseSummaryLabel = BTUI.label("识别语言、解析方式与输出格式", size: 11, color: .tertiaryLabelColor)
 
     private let headerIconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: appTitle)
@@ -351,7 +352,6 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
 
         addFullWidth(makeHeader(), to: mainStack, spacingAfter: 4)
         addFullWidth(makeDropCard(), to: mainStack)
-        addFullWidth(makeSettingsCard(), to: mainStack)
         addFullWidth(makeStepsCard(), to: mainStack)
         addFullWidth(makeStatusStack(), to: mainStack, spacingAfter: 2)
 
@@ -430,31 +430,46 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         return card
     }
 
-    private func makeSettingsCard() -> NSView {
-        let card = BTCardView(insets: NSEdgeInsets(top: 10, left: 16, bottom: 12, right: 16))
+    private func makeParseSection() -> NSView {
+        let section = NSView()
 
-        let headerRow = NSView()
-        let header = BTUI.sectionHeader(title: "解析设置", symbol: "slider.horizontal.3")
-        header.translatesAutoresizingMaskIntoConstraints = false
-        headerRow.addSubview(header)
+        let sectionStack = NSStackView()
+        sectionStack.orientation = .vertical
+        sectionStack.alignment = .leading
+        sectionStack.spacing = 6
+        sectionStack.translatesAutoresizingMaskIntoConstraints = false
+        section.addSubview(sectionStack)
+        NSLayoutConstraint.activate([
+            sectionStack.leadingAnchor.constraint(equalTo: section.leadingAnchor, constant: 32),
+            sectionStack.trailingAnchor.constraint(equalTo: section.trailingAnchor, constant: -2),
+            sectionStack.topAnchor.constraint(equalTo: section.topAnchor),
+            sectionStack.bottomAnchor.constraint(equalTo: section.bottomAnchor)
+        ])
+
+        // 当前解析摘要 + 可展开设置开关
+        let toggleRow = NSView()
+        parseSummaryLabel.lineBreakMode = .byTruncatingTail
+        parseSummaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        parseSummaryLabel.translatesAutoresizingMaskIntoConstraints = false
+        toggleRow.addSubview(parseSummaryLabel)
 
         parseSettingsToggle.target = self
         parseSettingsToggle.action = #selector(toggleParseSettings)
         parseSettingsToggle.translatesAutoresizingMaskIntoConstraints = false
-        headerRow.addSubview(parseSettingsToggle)
+        toggleRow.addSubview(parseSettingsToggle)
+
         NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor),
-            header.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
-            parseSettingsToggle.trailingAnchor.constraint(equalTo: headerRow.trailingAnchor),
-            parseSettingsToggle.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
-            parseSettingsToggle.widthAnchor.constraint(equalToConstant: 104),
-            headerRow.heightAnchor.constraint(equalToConstant: 22)
+            toggleRow.heightAnchor.constraint(equalToConstant: 24),
+            parseSummaryLabel.leadingAnchor.constraint(equalTo: toggleRow.leadingAnchor),
+            parseSummaryLabel.centerYAnchor.constraint(equalTo: toggleRow.centerYAnchor),
+            parseSummaryLabel.trailingAnchor.constraint(lessThanOrEqualTo: parseSettingsToggle.leadingAnchor, constant: -10),
+            parseSettingsToggle.trailingAnchor.constraint(equalTo: toggleRow.trailingAnchor),
+            parseSettingsToggle.centerYAnchor.constraint(equalTo: toggleRow.centerYAnchor),
+            parseSettingsToggle.widthAnchor.constraint(equalToConstant: 116)
         ])
-        card.stack.addArrangedSubview(headerRow)
-        headerRow.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
 
         let languageLabel = BTUI.formLabel("识别语言")
-        let parserLabel = BTUI.formLabel("PDF 解析")
+        let parserLabel = BTUI.formLabel("解析方式")
         let formatLabel = BTUI.formLabel("输出格式")
         let tokenLabel = BTUI.formLabel("MinerU Token")
 
@@ -482,6 +497,11 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
 
         formatPopup.addItems(withTitles: formatOptions.map(\.title))
         formatPopup.selectItem(at: 0)
+        formatPopup.target = self
+        formatPopup.action = #selector(parserSelectionChanged)
+
+        languagePopup.target = self
+        languagePopup.action = #selector(parserSelectionChanged)
 
         mineruTokenField.placeholderString = "填写一次即可，自动记住"
         mineruTokenField.isBezeled = true
@@ -514,10 +534,11 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         rowTwo.widthAnchor.constraint(equalTo: parseSettingsRows.widthAnchor).isActive = true
         parseSettingsRows.isHidden = true
 
-        card.stack.addArrangedSubview(parseSettingsRows)
-        parseSettingsRows.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
-        card.stack.spacing = 8
-        return card
+        sectionStack.addArrangedSubview(toggleRow)
+        toggleRow.widthAnchor.constraint(equalTo: sectionStack.widthAnchor).isActive = true
+        sectionStack.addArrangedSubview(parseSettingsRows)
+        parseSettingsRows.widthAnchor.constraint(equalTo: sectionStack.widthAnchor).isActive = true
+        return section
     }
 
     private func makeStepsCard() -> NSView {
@@ -533,6 +554,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
             button: ocrButton,
             detailAssign: { [weak self] label in self?.stepOneDetailLabel = label }
         )
+        let parseSection = makeParseSection()
         let stepTwo = makeStepRow(
             number: 2,
             title: "转换为 MD / TXT / EPUB",
@@ -547,7 +569,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
             detailAssign: { [weak self] label in self?.stepThreeDetailLabel = label }
         )
 
-        for view in [stepOne, BTUI.separator(), stepTwo, BTUI.separator(), stepThree] {
+        for view in [stepOne, parseSection, BTUI.separator(), stepTwo, BTUI.separator(), stepThree] {
             view.translatesAutoresizingMaskIntoConstraints = false
             card.stack.addArrangedSubview(view)
             view.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
@@ -557,6 +579,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         aiSection.translatesAutoresizingMaskIntoConstraints = false
         card.stack.addArrangedSubview(aiSection)
         aiSection.widthAnchor.constraint(equalTo: card.stack.widthAnchor).isActive = true
+        card.stack.setCustomSpacing(2, after: stepOne)
         card.stack.setCustomSpacing(2, after: stepThree)
 
         card.stack.spacing = 4
@@ -1064,7 +1087,7 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func updateParseSettingsToggle() {
-        parseSettingsToggle.setTitleText(parseSettingsExpanded ? "收起设置" : "展开设置")
+        parseSettingsToggle.setTitleText(parseSettingsExpanded ? "收起设置" : "解析设置")
         parseSettingsToggle.setSymbol(parseSettingsExpanded ? "chevron.up" : "chevron.right")
     }
 
@@ -1324,8 +1347,21 @@ private final class MainWindowController: NSWindowController, NSWindowDelegate, 
         parserPopup.indexOfSelectedItem == 0 ? "mineru" : "local"
     }
 
+    private func updateParseSummary() {
+        let language = selectedLanguage()?.title ?? "识别语言"
+        let parser = selectedParserCode() == "mineru" ? "MinerU" : "本地 OCR"
+        let format: String
+        switch selectedFormat()?.code {
+        case "txt": format = "TXT"
+        case "epub": format = "EPUB"
+        default: format = "MD"
+        }
+        parseSummaryLabel.stringValue = "\(language) · \(parser) · \(format)"
+    }
+
     private func refreshModeUI() {
         let parserIsMineru = selectedParserCode() == "mineru"
+        updateParseSummary()
         ocrButton.setTitleText(parserIsMineru ? "本地 OCR 备用" : "执行本地 OCR")
         stepOneDetailLabel?.stringValue = parserIsMineru
             ? "默认 MinerU 云端解析，OCR 备用"
