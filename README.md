@@ -1,112 +1,135 @@
 # BookTools
 
-这是给 Intel MacBook Pro 使用的本地图书处理工具项目。项目只保留合并版 App：
+[简体中文](README.zh-CN.md) | English
 
-`/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app`
+A native macOS (AppKit) toolkit that turns scanned PDFs into clean, editable ebooks. Built for Intel Macs and developed/tested on macOS 13.
 
-项目已纳入 git 版本管理；清理前的旧版 App 和源码保留在初始提交 `faf60f3` 中，需要时可从历史恢复。
+[Download the latest release](https://github.com/KBDZequalsCK/BookTools/releases/latest) · [中文说明](README.zh-CN.md)
 
-## 下载
+## Features
 
-在 GitHub Releases 下载最新的 `PDF-Book-Tools-1.0.0.dmg`，打开后把 App 拖到“应用程序”。App 使用本地 ad-hoc 签名、未经过 Apple 公证，首次打开如果被系统拦截，请在 Finder 里右键 App 选择“打开”。
+- **PDF parsing** — MinerU cloud parsing by default, with a local OCRmyPDF / Tesseract fallback.
+- **Format conversion** — output MD, TXT, or EPUB.
+- **AI reflow** — hand MD/TXT directly to the built-in AI layout engine, with book-aware chunking and resumable checkpoints.
+- **One-click pipeline** — parse → convert → AI reflow in a single run.
+- **API utilities** — test the AI endpoint and fetch the available model list.
+- **Bilingual UI** — switch between Chinese and English instantly; Chinese is the default.
+- **Appearance** — follow the system, light, or dark.
+- **Collapsible settings** — parse and AI settings remember whether they were expanded.
 
-## 当前 App 功能
+## Download
 
-合并版 `PDF Book Tools.app` 的目标流程是：
+Download the latest `PDF-Book-Tools-1.0.0.dmg` from [Releases](https://github.com/KBDZequalsCK/BookTools/releases). Open the DMG and drag `PDF Book Tools.app` into Applications.
 
-1. PDF 解析，默认使用 MinerU 精准解析 API，也保留本地 OCRmyPDF / Tesseract 备用路线。
-2. PDF 转换为 MD / TXT / EPUB。
-3. MD / TXT 直接在主窗口内交给 AI 排版。
-4. 文件选择行右侧的“一键处理”可把 PDF 解析、转换、AI 排版串起来一次完成；选中 TXT / MD 时按钮变为“一键 AI 排版”，直接开始排版。
+The app is ad-hoc signed and not notarized by Apple. If macOS blocks the first launch, right-click the app in Finder and choose **Open**.
 
-AI 排版已集成在主窗口第三步下方，接口设置可展开，默认沿用上次保存的配置，不需要另外打开窗口或重新选择文件。
+## Requirements
 
-## 目录结构
+- macOS 13 or later
+- Intel Mac (the current build targets x86_64)
+- A MinerU token, or a local installation of OCRmyPDF, Tesseract, Ghostscript, and qpdf for the local OCR route
 
-- `BookToolsHubApp.swift`：合并版主窗口源码，包含内联 AI 排版区。
-- `AIReflowEngine.swift`：AI 排版引擎（分块、请求 API、断点续跑），不依赖窗口。
-- `BookToolsUI.swift`：界面组件（卡片、按钮、拖拽区、进度条等）。
-- `Localization.swift`：界面语言定义与 `L(中文, English)` 文案函数，语言保存在 UserDefaults（`appLanguage`）。
-- `reflow_txt_epub_worker.command`：PDF 解析和转换 worker，包含 MinerU 和本地 OCR 路线。
-- `BookToolsHub_Info.plist`：合并版 App 的 plist。
-- `Assets/`：App 图标资源。`AppIcon-source.png` 是原始图，`AppIcon.icns` 是打包后的图标，`make_icon.py` 负责裁切圆角、加阴影并生成 iconset。
-- `Apps/PDF Book Tools.app`：唯一保留的合并版 App。
+## Workflow
 
-## 重要实现说明
+The main window follows a three-step workflow:
 
-- `PDF Book Tools.app` 已经可以移动位置，当前放在 `Apps/` 下。
-- 主窗口第三步“交给 AI 排版”下方就是 AI 排版区，不再打开独立窗口。
-- “一键处理”只增加串联入口，第 1、2、3 步原有按钮都保留，仍可单独执行解析、转换或 AI 排版。
-- 选中 PDF 时，“一键处理”会先检查 AI 接口配置，再自动完成解析、转换和 AI 排版；如果当前输出格式是 EPUB，会自动改用 MD，因为 AI 排版需要可直接读取的文本。
-- 选中 TXT / MD 时，“一键 AI 排版”直接对当前文件开始排版，不需要再点第 2 步。
-- 主窗口已经生成 MD/TXT 时，“开始 AI 排版”会自动使用该文本；直接选择 TXT / MD 文件时也会自动使用，无需重复选择。
-- “解析设置”在第 1 步下方，“AI 排版接口设置”在第 3 步下方，都可折叠，默认收起，并记住上次的展开/收起状态。
-- 主窗口内容放在滚动视图里；窗口尺寸保持在 860×820 左右，展开设置时日志区自动压缩，内容超出时出现滚动条，窗口大小不会跟着设置展开而变化。
-- 解析设置展开后可调整识别语言、解析方式、输出格式和 MinerU Token；AI 设置展开后按“API 地址 → API Key → 模型”的顺序填写。
-- API Key 右侧的眼睛按钮可在明文和掩码之间切换；明文状态下可以直接用键盘复制 Key。
-- “模型”行右侧是“拉取模型”和“测试接口”：拉取会从当前 API 地址推导出 `/v1/models` 并弹出菜单供选择；测试会向当前地址发送一次很短的消息，确认 API 地址、API Key 和模型是否可用。结果会显示在设置区并写入运行日志，测试会消耗极少量 token。
-- 如果接口不支持 `/models`，仍可手动填写模型名；测试前请先把模型填对。
-- 标题右侧的外观下拉框可切换“跟随系统 / 浅色 / 深色”，默认跟随系统；选择会保存到 UserDefaults（`appearanceMode`），重启后继续生效，界面颜色随外观自动适配。
-- 外观下拉框左侧是界面语言下拉框，可选“中文 / English”，默认中文；切换后立即生效（无需重启），并记住到 UserDefaults（`appLanguage`）。英文界面下菜单栏、按钮、设置项、状态都会切换为英文；运行日志里固定的 `STATUS=` / `ERROR=` 行会转成英文，其余脚本原始输出和第三方工具日志保持原样。
-- App 自带标准的“编辑”菜单，所以输入框里可以用 ⌘C / ⌘V / ⌘A 等快捷键；之前没有菜单时只能通过右键菜单复制粘贴。
-- 配置会保存到 UserDefaults；不修改配置时直接点“开始 AI 排版”即可。
-- 合并版会兼容读取旧 AI 排版 App 的已保存配置域：`local.codex.ai-txt-reflow`。
-- 不要把 API Key、MinerU Token 写进源码或 README。
+1. **Parse the PDF** — MinerU cloud parsing by default; local OCRmyPDF / Tesseract remains available as a fallback.
+2. **Convert** — produce MD, TXT, or EPUB.
+3. **AI reflow** — hand MD/TXT to the built-in AI layout engine.
 
-## AI 排版逻辑
+The **One-click** button next to the file row runs parsing, conversion, and AI reflow in sequence. When a TXT/MD file is selected, it becomes **One-click AI reflow** and starts layout immediately.
 
-Markdown 输入会使用更适合书籍的分块方式：
+The AI layout panel lives inline below step 3. Its API settings can be expanded and reuse the last saved configuration — no separate window and no need to re-select the file.
 
-- 新任务优先按目录、前言、章节、结语、译后记等大边界分块。
-- 如果某章太长，再在章内按小标题/段落继续拆。
-- 每块发送给 AI 前，会附带当前块编号、当前章/大节、当前块内标题。
-- 这样可以帮助 AI 判断哪些是页眉污染，哪些是真正标题。
-- 为了保护旧任务，继续未完成断点时会兼容旧分块算法，避免因为分块变化导致无法续跑。
+## Repository layout
 
-AI 排版断点规则：
+- `BookToolsHubApp.swift` — main window and inline AI layout UI.
+- `AIReflowEngine.swift` — AI layout engine (chunking, API requests, resumable checkpoints), independent of the UI.
+- `BookToolsUI.swift` — UI components (cards, buttons, drop area, progress bar).
+- `Localization.swift` — language definitions and the `L(Chinese, English)` helper; the choice is stored in UserDefaults (`appLanguage`).
+- `reflow_txt_epub_worker.command` — PDF parsing and conversion worker for both MinerU and local OCR.
+- `BookToolsHub_Info.plist` — app bundle Info.plist.
+- `Assets/` — icon assets. `AppIcon-source.png` is the source image, `AppIcon.icns` is the packaged icon, and `make_icon.py` applies rounded corners and a shadow before generating the iconset.
+- `Apps/PDF Book Tools.app` — the single maintained app bundle.
 
-- 失败、退出、网络中断时，保留 `.part` 和 `.resume.json`。
-- 输入文本旁存在断点时，主窗口会显示“继续未完成 / 跳过当前块 / 清理断点”，主按钮也会变为“继续 AI 排版”。
-- 只有用户点击“终止 AI 排版”或“清理断点”才删除断点。
-- 成功完成后自动清理临时文件和断点。
+## Build
 
-## 本地 OCR 逻辑
-
-本地 OCR 解析时会先检测 PDF 是否已有可用文字层：
-
-- 如果已有可用文字层，跳过 OCR，直接提取文字。
-- 如果没有文字层或文字太少，才调用 OCRmyPDF / Tesseract。
-- 日志会显示 `检测到已有可用文字层，跳过 OCR` 或 `准备进行本地 OCR`。
-
-## 构建合并版 App
-
-在 `/Users/kbdz/Documents/BookTools` 下执行：
+From the repository root:
 
 ```zsh
-cd /Users/kbdz/Documents/BookTools
+cd /path/to/BookTools
 cp BookToolsHubApp.swift /tmp/main.swift
 swiftc -target x86_64-apple-macosx13.0 -O /tmp/main.swift AIReflowEngine.swift BookToolsUI.swift Localization.swift -o /tmp/PDFBookTools.new
-cp /tmp/PDFBookTools.new "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app/Contents/MacOS/PDFBookTools"
-cp reflow_txt_epub_worker.command "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app/Contents/Resources/reflow_txt_epub_worker.command"
-cp Assets/AppIcon.icns "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app/Contents/Resources/AppIcon.icns"
-codesign --force --deep --sign - "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
-codesign --verify --deep --strict --verbose=2 "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
-open "/Users/kbdz/Documents/BookTools/Apps/PDF Book Tools.app"
+cp /tmp/PDFBookTools.new "Apps/PDF Book Tools.app/Contents/MacOS/PDFBookTools"
+cp reflow_txt_epub_worker.command "Apps/PDF Book Tools.app/Contents/Resources/reflow_txt_epub_worker.command"
+cp Assets/AppIcon.icns "Apps/PDF Book Tools.app/Contents/Resources/AppIcon.icns"
+codesign --force --deep --sign - "Apps/PDF Book Tools.app"
+codesign --verify --deep --strict --verbose=2 "Apps/PDF Book Tools.app"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "Apps/PDF Book Tools.app"
+open "Apps/PDF Book Tools.app"
 ```
 
-说明：
+Notes:
 
-- Intel Mac 编译目标使用 `x86_64-apple-macosx13.0`。
-- 需要把 `BookToolsHubApp.swift` 临时复制成 `/tmp/main.swift`，因为 Swift 多文件编译时只有 `main.swift` 适合放顶层启动代码。
-- 编译后必须重新签名，否则 App 可能打不开或行为异常。
-- 图标由 `Assets/make_icon.py` 生成：先处理 `AppIcon-source.png`，再执行 `iconutil -c icns` 得到 `AppIcon.icns`；App 的 `CFBundleIconFile` 指向 `AppIcon`。
-- 换图标后如果 Finder/Dock 仍显示旧图标，通常是 LaunchServices / Dock 缓存：先对 App 执行 `lsregister -f`，必要时再 `killall Dock`（Dock 会自动重启）并重新打开 App。
+- The Intel build target is `x86_64-apple-macosx13.0`.
+- `BookToolsHubApp.swift` must be copied to `/tmp/main.swift` because Swift only allows top-level startup code in `main.swift` when compiling multiple files.
+- Re-sign the bundle after every build, otherwise the app may fail to launch or behave incorrectly.
+- Icons are generated by `Assets/make_icon.py`: process `AppIcon-source.png`, then run `iconutil -c icns` to produce `AppIcon.icns`. `CFBundleIconFile` points to `AppIcon`.
+- If Finder/Dock still shows an old icon, refresh LaunchServices with `lsregister -f`, then `killall Dock` if necessary.
 
-## 维护注意事项
+## Implementation notes
 
-- 默认只维护合并版 `PDF Book Tools.app`；旧版独立 App 和源码已清理，需要时从 git 历史 `faf60f3` 恢复。
-- 手动改文件时优先改源码，再重新编译和签名，不要直接改二进制。
-- 不要删除用户正在使用的 `.part` 和 `.resume.json` 断点文件，除非用户明确要求清理。
-- 如果要优化界面，优先保持三步流程清晰：PDF 解析，转换为 MD/TXT/EPUB，MD/TXT 交给 AI 排版。
-- API Key 和 MinerU Token 使用 `NoAutoFillSecureTextField`，它覆盖了 AppKit 的 `_isPasswordAutofillEnabled` 私有开关，避免输入框获得焦点或点击“测试接口”“拉取模型”时弹出系统“密码”自动填充面板；如果后续 macOS 版本让这个面板重新出现，先检查这处覆盖是否仍生效。
+- The app bundle is relocatable and currently lives under `Apps/`.
+- Step 3 hosts the AI layout panel inline; no separate window is opened.
+- The one-click button is only a shortcut. The original parse, convert, and AI layout buttons all remain independently usable.
+- For PDFs, one-click first checks the AI configuration, then runs parsing, conversion, and AI reflow. If the selected output format is EPUB, it automatically switches to MD because AI reflow needs directly readable text.
+- For TXT/MD, one-click starts layout on the selected file without running step 2.
+- If the window already produced MD/TXT, **Start AI layout** uses that text automatically; directly selected TXT/MD files are used as well.
+- **Parse settings** sits under step 1 and **AI API settings** under step 3. Both are collapsed by default and remember their last state.
+- The window content lives in a scroll view. The window stays around 860×820; expanding settings compresses the log area, and a scroll bar appears when needed, so the window doesn't resize.
+- Parse settings cover recognition language, parser, output format, and MinerU token. AI settings are ordered API URL → API Key → model.
+- The eye button next to the API Key toggles between plain text and masked input; in plain-text mode the key can be copied with the keyboard.
+- **Fetch models** derives `/v1/models` from the current API URL and shows a menu to pick from. **Test API** sends a very short message to verify the URL, key, and model. Results appear in the settings area and in the run log; a test consumes a minimal number of tokens.
+- If the endpoint doesn't support `/models`, the model name can still be entered manually. Make sure the model is correct before testing.
+- The appearance popup in the header switches between **Follow System / Light / Dark** (system by default) and is saved to UserDefaults (`appearanceMode`).
+- The language popup to its left switches between **中文 / English** (Chinese by default), takes effect immediately, and is saved to UserDefaults (`appLanguage`). In English mode the menu bar, buttons, settings, and status messages switch to English; fixed `STATUS=` / `ERROR=` log lines are translated while raw script output and third-party tool logs stay as-is.
+- The app ships a standard **Edit** menu, so ⌘C / ⌘V / ⌘A work in text fields.
+- Configuration is stored in UserDefaults. If nothing needs changing, just click **Start AI layout**.
+- The merged app also reads settings from the legacy AI layout domain `local.codex.ai-txt-reflow`.
+- Never commit API keys or MinerU tokens to the source code or this README.
+
+## AI layout details
+
+Markdown input is chunked in a book-aware way:
+
+- New jobs prefer major boundaries such as the table of contents, preface, chapters, conclusion, and afterword.
+- Overlong chapters are split further at subheadings and paragraphs.
+- Each chunk is sent with its chunk index, current chapter/section, and in-chunk heading, helping the model distinguish running headers from real headings.
+- Unfinished jobs keep using the legacy chunking algorithm so existing checkpoints can still resume.
+
+Checkpoint rules:
+
+- `.part` and `.resume.json` files are kept on failure, exit, or network interruption.
+- If checkpoints exist next to the input text, the window offers **Resume / Skip current chunk / Clear checkpoints**, and the main button becomes **Resume AI layout**.
+- Checkpoints are deleted only when the user clicks **Stop AI layout** or **Clear checkpoints**.
+- Temporary files and checkpoints are cleaned up automatically after a successful run.
+
+## Local OCR details
+
+Before OCR, the worker checks whether the PDF already has a usable text layer:
+
+- If a usable text layer exists, OCR is skipped and text is extracted directly.
+- Otherwise OCRmyPDF / Tesseract is invoked.
+- The log reports `检测到已有可用文字层，跳过 OCR` or `准备进行本地 OCR` (worker output stays in Chinese; fixed status/error lines are translated in the English UI).
+
+## Maintenance notes
+
+- Only the merged `PDF Book Tools.app` is maintained. The older standalone apps and sources were removed; they remain available in the repository's initial commit.
+- Edit the source and rebuild/re-sign; do not patch the binary directly.
+- Do not delete a user's active `.part` or `.resume.json` checkpoints unless they explicitly ask for cleanup.
+- Keep the three-step flow clear when changing the UI: parse PDF → convert to MD/TXT/EPUB → AI layout for MD/TXT.
+- API keys and MinerU tokens use `NoAutoFillSecureTextField`, which overrides AppKit's private `_isPasswordAutofillEnabled` switch to suppress the system password AutoFill panel when fields gain focus or when **Test API** / **Fetch models** is clicked. If a future macOS version brings the panel back, check that override first.
+
+## Security
+
+API keys and MinerU tokens live only in local preferences. They are never written to the source code or this repository.
